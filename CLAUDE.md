@@ -231,7 +231,9 @@ Subagent 也是 ALL_TOOLS 里的普通工具。executor 内部启动一个新的
     "description": "快速搜索代码库",
     "system_prompt": "You are a code exploration agent...",
     "max_turns": 12,
-    "tools": ["bash", "read_file", "grep"]  # 可选工具白名单
+    "allowed_tools": ["bash", "read_file", "grep"],  # 可选工具白名单（None=全部）
+    "disallowed_tools": ["Skill"],                    # 可选工具黑名单（applied after whitelist）
+    "skills": ["commit", "review-pr"],                # 可选 skill 实例白名单（None=全部）
 }
 ```
 
@@ -253,6 +255,22 @@ map_result 转换后 LLM 看到: 子 agent 的最终输出文本
 - 子 agent 的 system_prompt 里写明: "Do NOT spawn sub-agents; execute directly."
 - depth 参数做兜底限制，超过则报错
 - 子 agent 不能派生新的子 agent（通过 prompt + depth 双重控制）
+
+### 两层过滤模型
+
+Tool 和 Skill 使用不同层级的过滤:
+
+**Layer 1 — Tool 大类过滤**（bash, read_file, grep, Skill, agent）
+- `allowed_tools`: 白名单。`None` = 全部工具（默认）
+- `disallowed_tools`: 黑名单。应用在白名单之后
+- `_resolve_tools()` 执行: whitelist → exclude 'agent' → subtract blacklist
+- `build_tool_schemas()` 按最终工具列表生成 schema，不再强制包含 Skill
+
+**Layer 2 — Skill 实例过滤**（commit, review-pr, pdf 等具体 skill）
+- `skills`: 精确模式白名单。`None` = 全部 skill（默认）
+- 控制 `format_skill_listing()` 的 `filter_names` 参数
+- 只影响 `<system-reminder>` 中注入的 skill 列表，不影响 Skill tool 本身
+- 如果 Skill 工具被 disallowed_tools 移除，skill 列表也不会注入（无意义）
 
 ---
 

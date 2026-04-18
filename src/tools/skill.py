@@ -94,15 +94,16 @@ def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         return ToolResult(data={"success": False, "error": f"Unknown skill: {skill_name}"})
 
     # --- Fork mode ---
-    # Sub-agents (depth > 0) cannot invoke fork skills — that would create
-    # a nested agent loop.  Only the top-level agent may fork.
+    # Fork skills launch a sub-agent loop, which increases depth.
+    # Block only when we've already hit the maximum nesting depth.
     if skill.is_fork:
-        if context.depth > 0:
+        if context.depth >= config.MAX_AGENT_DEPTH:
             return ToolResult(data={
                 "success": False,
                 "error": (
-                    f"Fork skill '{skill_name}' cannot be invoked from a sub-agent. "
-                    "Only inline skills are allowed at this depth."
+                    f"Fork skill '{skill_name}' cannot be invoked: "
+                    f"maximum agent depth ({config.MAX_AGENT_DEPTH}) reached "
+                    f"(current depth: {context.depth})."
                 ),
             })
         return (yield from _execute_fork(skill, inputs, context))
@@ -143,12 +144,8 @@ def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
         allowed = list(skill.allowed_tools)
 
         def _modifier(ctx: ToolUseContext) -> ToolUseContext:
-            return ToolUseContext(
-                messages=ctx.messages,
-                tools=allowed,
-                depth=ctx.depth,
-                abort_signal=ctx.abort_signal,
-            )
+            from dataclasses import replace
+            return replace(ctx, tools=allowed)
 
         context_modifier = _modifier
 
@@ -235,6 +232,18 @@ def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
     else:
         # No restriction — use all tools except Skill (prevent recursion via prompt)
         sub_tool_names = list(ALL_TOOLS.keys())
+
+    # --- Inject skill + agent listings if those tools are available ---
+    # Same pattern as tools/agent.py: fresh sub-agent context, no global
+    # tracker mutation. exclude_fork_skills=True prevents fork-skill→fork-skill
+    # recursion via the Skill tool.
+    from src.messages import build_metadata_reminders  # local to avoid circular
+
+    initial_messages.extend(build_metadata_reminders(
+        sub_tool_names,
+        use_sent_tracking=False,
+        exclude_fork_skills=True,
+    ))
 
     # --- Sub-agent context ---
     sub_context = ToolUseContext(

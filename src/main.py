@@ -18,7 +18,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from src import config
 from src.agent_loop import agent_loop
 from src.types import AgentState, MessageHistory
-
+from src.mcp_tool import register_mcp_tools
+from src.tools import ALL_TOOLS
 
 def main() -> None:
     if not config.ANTHROPIC_AUTH_TOKEN:
@@ -32,7 +33,7 @@ def main() -> None:
     # passes it into queryLoop() each turn.
     history = MessageHistory()
     state = AgentState()
-
+    register_mcp_tools(ALL_TOOLS)
     while True:
         try:
             user_input = input("> ")

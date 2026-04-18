@@ -5,6 +5,10 @@ import os
 ANTHROPIC_AUTH_TOKEN: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
 ANTHROPIC_BASE_URL: str | None = os.environ.get("ANTHROPIC_BASE_URL", None)
 
+# Active provider — resolved by src/providers/get_provider() at call time.
+# Override via env so users can swap backends without editing config.py.
+PROVIDER: str = os.environ.get("AGENT_PROVIDER", "anthropic")
+
 MODEL: str = "claude-sonnet-4-6"
 MAX_TOKENS: int = 16384
 MAX_TURNS: int = 30

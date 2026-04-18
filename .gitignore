@@ -1,20 +1,52 @@
-.claude/
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ---- IDE / Editor ----
 .vscode/
 .idea/
-*.log
+*.swp
+*.swo
+
+# ---- Claude Code ----
+.claude/
+
+# ---- Playwright MCP ----
 .playwright-mcp/
+
+# ---- Node (MCP servers) ----
 node_modules/
-C/
+
+# ---- OS ----
+nul
+Thumbs.db
+.DS_Store
+
+# ---- Logs ----
+*.log
+
+# ---- Project: analysis artifacts (not source) ----
+analysis/
 docs/
-.pytest_cache/
-__pycache__/
+C:/
+
+# ---- Project: stray files from earlier sessions ----
 ANALYTICS.md
+ANSWER_SUMMARY.md
+DELIVERY_SUMMARY.md
+EXACT_LINE_NUMBERS.md
+SKILL_LISTING_COMPARISON.txt
+SKILL_LISTING_INJECTION_ORDER.md
+architecture_preview.png
 architecture.md
 CLAUSE.md
 DEVELOPMENT.md
 EXPERIMENTS.md
-nul
+
+# ---- Build / Config (not needed in repo yet) ----
 pyproject.toml
-README.md
-SKILL_LISTING_COMPARUSON.txt
-SKILL_LISTING_INJCTION_ORDER.md

@@ -223,7 +223,12 @@ def discover_skills(skills_dirs: list[str] | None = None) -> dict[str, SkillInfo
 _MAX_LISTING_DESC_CHARS = 250
 
 
-def format_skill_listing(skills: dict[str, SkillInfo], *, exclude_fork: bool = False) -> str:
+def format_skill_listing(
+    skills: dict[str, SkillInfo],
+    *,
+    exclude_fork: bool = False,
+    filter_names: list[str] | None = None,
+) -> str:
     """Build the system-reminder text that tells the LLM which skills are available.
 
     Mirrors formatCommandsWithinBudget() in prompt.ts.
@@ -240,6 +245,9 @@ def format_skill_listing(skills: dict[str, SkillInfo], *, exclude_fork: bool = F
         exclude_fork:  If True, skip fork-mode skills from the listing.
                        Used by sub-agents which may only use inline skills
                        (fork skills would create nested agent loops).
+        filter_names:  If not None, only include skills whose name is in
+                       this list.  Implements per-agent skill precise mode
+                       (mirrors Claude Code's agent-level skills whitelist).
     """
     if not skills:
         return ""
@@ -248,6 +256,8 @@ def format_skill_listing(skills: dict[str, SkillInfo], *, exclude_fork: bool = F
     for skill in skills.values():
         if exclude_fork and skill.is_fork:
             continue
+        if filter_names is not None and skill.name not in filter_names:
+            continue
         desc = skill.description
         if skill.when_to_use:
             desc = f"{desc} - {skill.when_to_use}"
@@ -255,7 +265,7 @@ def format_skill_listing(skills: dict[str, SkillInfo], *, exclude_fork: bool = F
             desc = desc[: _MAX_LISTING_DESC_CHARS - 1] + "\u2026"
         lines.append(f"- {skill.name}: {desc}")
 
-    # All skills were fork-mode and got filtered out
+    # All skills were filtered out
     if len(lines) == 1:
         return ""
 

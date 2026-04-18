@@ -31,7 +31,7 @@ _DEFAULT_AGENT = AgentDefinition(
         "Guidelines:\n"
         "- Be thorough and complete the task fully\n"
         "- You may use available skills (inline mode) if they help your task\n"
-        "- Do NOT spawn sub-agents; execute directly\n"
+        "- You may spawn sub-agents if the task benefits from delegation\n"
         "- When finished, provide a clear summary of what you did\n"
     ),
     max_turns=20,
@@ -88,15 +88,33 @@ AGENT_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
-    """Build tool name list for the sub-agent, always excluding 'agent' itself."""
+    """Build tool name list for the sub-agent.
+
+    Resolution order (mirrors Claude Code's tool resolution):
+      1. Start with allowed_tools whitelist (or all tools if None)
+      2. Subtract disallowed_tools blacklist
+
+    The 'agent' tool is NOT automatically excluded — sub-agents can spawn
+    further sub-agents as long as depth < MAX_AGENT_DEPTH. Agent definitions
+    can explicitly add 'agent' to disallowed_tools if they are leaf agents
+    that should not delegate.
+    """
     from src.tools import ALL_TOOLS  # local import to avoid circular
 
     if agent_def.allowed_tools is not None:
-        # Use whitelist — filter out 'agent' just in case
-        return [t for t in agent_def.allowed_tools if t != "agent"]
+        # Whitelist — intersect with ALL_TOOLS to discard unknown names
+        whitelist = set(agent_def.allowed_tools)
+        tools = [name for name in ALL_TOOLS if name in whitelist]
+    else:
+        # No whitelist — all tools available
+        tools = list(ALL_TOOLS.keys())
 
-    # No whitelist — get all tools, then remove 'agent'
-    return [name for name in ALL_TOOLS if name != "agent"]
+    # Apply disallowed_tools blacklist
+    if agent_def.disallowed_tools:
+        blacklist = set(agent_def.disallowed_tools)
+        tools = [t for t in tools if t not in blacklist]
+
+    return tools
 
 
 def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
@@ -134,29 +152,29 @@ def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
             ),
         })
 
+    # --- Build tool name list ---
+    sub_tool_names = _resolve_tools(agent_def)
+
     # --- Build initial messages ---
     initial_messages: list[dict] = [
         {"role": "user", "content": prompt}
     ]
 
-    # --- Inject skill listing so the sub-agent knows which skills exist ---
-    # Uses format_skill_listing() directly instead of build_skill_reminder()
-    # because the reminder's global _sent_skill_names tracker is shared with
-    # the main agent — sub-agents need their own independent copy.
-    # Fork skills don't get this (they shouldn't invoke other skills).
-    from src.skills import get_skills, format_skill_listing  # local to avoid circular
+    # --- Inject skill + agent listings so the sub-agent knows what's available ---
+    # use_sent_tracking=False: sub-agent has an independent context; we must
+    #   build the full listing here AND not mutate the main agent's global
+    #   _sent_* trackers.
+    # skill_filter=agent_def.skills: per-agent precise mode (None = all skills).
+    # exclude_fork_skills=True: sub-agents shouldn't spawn fork skills (would
+    #   create nested agent loops).
+    from src.messages import build_metadata_reminders  # local to avoid circular
 
-    all_skills = get_skills()
-    if all_skills:
-        listing = format_skill_listing(all_skills, exclude_fork=True)
-        if listing:
-            initial_messages.append({
-                "role": "user",
-                "content": f"<system-reminder>\n{listing}\n</system-reminder>",
-            })
-
-    # --- Build tool name list ---
-    sub_tool_names = _resolve_tools(agent_def)
+    initial_messages.extend(build_metadata_reminders(
+        sub_tool_names,
+        use_sent_tracking=False,
+        skill_filter=agent_def.skills,
+        exclude_fork_skills=True,
+    ))
 
     # --- Sub-agent context ---
     sub_context = ToolUseContext(

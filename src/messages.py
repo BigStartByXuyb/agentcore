@@ -5,6 +5,121 @@ from __future__ import annotations
 from src.tools import ALL_TOOLS
 
 
+# ---------------------------------------------------------------------------
+# Metadata reminders (skill / agent listings)
+# ---------------------------------------------------------------------------
+
+def build_metadata_reminders(
+    tools: list[str],
+    *,
+    use_sent_tracking: bool = True,
+    skill_filter: list[str] | None = None,
+    exclude_fork_skills: bool = False,
+) -> list[dict]:
+    """Build <system-reminder> user messages announcing available skills/agents.
+
+    Called by both the main REPL and every sub-agent launch point so the
+    sub-agent LLM knows which skills/agents it can invoke.
+
+    Which reminders are produced depends on which tools are present:
+      - "Skill" in tools  → skill listing
+      - "agent" in tools  → agent listing
+
+    Parameters:
+        tools:
+            The sub-agent's / caller's tool name list (case-insensitive match).
+        use_sent_tracking:
+            True  — main agent: dedupe via global _sent_skill_names /
+                    _sent_agent_names trackers; only new entries returned.
+            False — sub-agent: always produce the full listing. Does NOT
+                    mutate the global trackers, so sub-agent launches never
+                    pollute the main agent's dedupe state.
+        skill_filter:
+            If not None, restrict the skill listing to these skill names
+            (mirrors Claude Code's per-agent precise skill mode). Only
+            honored when use_sent_tracking=False.
+        exclude_fork_skills:
+            If True, omit fork-mode skills from the listing. Used by
+            sub-agents which should run inline skills only. Only honored
+            when use_sent_tracking=False.
+
+    Returns:
+        A list of 0-2 user messages ready to be appended to the sub-agent's
+        initial_messages (or injected into the main history).
+    """
+    tools_lower = {t.lower() for t in tools}
+    reminders: list[dict] = []
+
+    # --- Skill listing ---
+    if "skill" in tools_lower:
+        msg = _build_skill_reminder_msg(
+            use_sent_tracking=use_sent_tracking,
+            skill_filter=skill_filter,
+            exclude_fork_skills=exclude_fork_skills,
+        )
+        if msg is not None:
+            reminders.append(msg)
+
+    # --- Agent listing ---
+    if "agent" in tools_lower:
+        msg = _build_agent_reminder_msg(use_sent_tracking=use_sent_tracking)
+        if msg is not None:
+            reminders.append(msg)
+
+    return reminders
+
+
+def _build_skill_reminder_msg(
+    *,
+    use_sent_tracking: bool,
+    skill_filter: list[str] | None,
+    exclude_fork_skills: bool,
+) -> dict | None:
+    """Build the skill reminder user message, honoring sub-agent isolation."""
+    if use_sent_tracking:
+        # Main agent — delegate to build_skill_reminder() which dedupes
+        # via the global _sent_skill_names tracker.
+        from src.skills import build_skill_reminder
+        return build_skill_reminder()
+
+    # Sub-agent — call format_skill_listing directly. No tracker mutation
+    # (sub-agent has independent context; must not affect main dedupe state).
+    from src.skills import get_skills, format_skill_listing
+    all_skills = get_skills()
+    if not all_skills:
+        return None
+    listing = format_skill_listing(
+        all_skills,
+        exclude_fork=exclude_fork_skills,
+        filter_names=skill_filter,
+    )
+    if not listing:
+        return None
+    return {
+        "role": "user",
+        "content": f"<system-reminder>\n{listing}\n</system-reminder>",
+    }
+
+
+def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> dict | None:
+    """Build the agent reminder user message, honoring sub-agent isolation."""
+    if use_sent_tracking:
+        from src.agents import build_agent_reminder
+        return build_agent_reminder()
+
+    from src.agents import get_agents, format_agent_listing
+    all_agents = get_agents()
+    if not all_agents:
+        return None
+    listing = format_agent_listing(all_agents)
+    if not listing:
+        return None
+    return {
+        "role": "user",
+        "content": f"<system-reminder>\n{listing}\n</system-reminder>",
+    }
+
+# tools checking and schema construction for the API "tools" parameter is centralized
 def build_tool_schemas(
     allowed_tools: list[str] | None = None,
     tool_overrides: dict | None = None,
@@ -13,8 +128,12 @@ def build_tool_schemas(
 
     If allowed_tools is provided, only include schemas for tools in the list.
     If tool_overrides is provided, use overridden ToolDef.schema for matching names.
-    The Skill tool is always included so the LLM can invoke skills even when
-    a skill restricts available tools.
+
+    Previously the Skill tool was force-included via an always_include set.
+    That's been removed: whether Skill is available is now fully controlled
+    by allowed_tools / disallowed_tools in the ToolUseContext.  The Skill
+    tool's context_modifier (inline mode) already includes "Skill" in its
+    own allowed_tools list, so skills that restrict tools still work.
     """
     overrides = tool_overrides or {}
 
@@ -27,11 +146,9 @@ def build_tool_schemas(
                 result.append(tool.schema)
         return result
 
-    # Always include Skill tool so LLM can chain skills
-    always_include = {"Skill"}
     result = []
     for name, tool in ALL_TOOLS.items():
-        if name in allowed_tools or name in always_include:
+        if name in allowed_tools:
             if name in overrides:
                 result.append(overrides[name].schema)
             else:

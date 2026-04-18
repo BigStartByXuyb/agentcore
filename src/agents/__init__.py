@@ -16,6 +16,8 @@ Agent definition file format (agents/<name>/AGENT.md):
     description: When to use this agent
     max_turns: 12
     allowed_tools: bash, read_file, grep
+    disallowed_tools: Skill
+    skills: commit, review-pr
     ---
 
     You are a specialized agent...
@@ -46,6 +48,11 @@ class AgentDefinition:
         max_turns:        Maximum LLM turns before forced stop
         allowed_tools:    Whitelist — None means all tools (agent excluded)
         disallowed_tools: Blacklist — applied after allowed_tools
+        skills:           Skill instance whitelist — None means all skills
+                          (mirrors Claude Code's per-agent precise mode:
+                          if set, only these skill names are injected in
+                          the <system-reminder> listing; if None, the full
+                          skill listing is injected)
     """
 
     name: str
@@ -54,6 +61,7 @@ class AgentDefinition:
     max_turns: int = 12
     allowed_tools: list[str] | None = None
     disallowed_tools: list[str] | None = None
+    skills: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +100,15 @@ def _parse_disallowed_tools(value: Any) -> list[str] | None:
     return _parse_allowed_tools(value)  # same parsing logic
 
 
+def _parse_skills(value: Any) -> list[str] | None:
+    """Parse skills from frontmatter.
+
+    Returns None if not specified (= no restriction, all skills visible).
+    Accepts comma-separated string or YAML list.
+    """
+    return _parse_allowed_tools(value)  # same parsing logic
+
+
 def _load_agent_from_dir(agent_dir: str) -> AgentDefinition | None:
     """Load a single agent from its directory (agent_dir/AGENT.md).
 
@@ -121,6 +138,7 @@ def _load_agent_from_dir(agent_dir: str) -> AgentDefinition | None:
     disallowed_tools = _parse_disallowed_tools(
         fm.get("disallowed_tools") or fm.get("disallowed-tools")
     )
+    skills = _parse_skills(fm.get("skills"))
 
     system_prompt = body.strip()
     if not system_prompt:
@@ -133,6 +151,7 @@ def _load_agent_from_dir(agent_dir: str) -> AgentDefinition | None:
         max_turns=max_turns,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
+        skills=skills,
     )
 
 

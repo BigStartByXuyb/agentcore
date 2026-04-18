@@ -23,11 +23,11 @@ from src.types import AgentState, MessageHistory, ToolUseContext
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import strip_thinking_blocks, filter_orphaned_thinking_messages
+from src.messages import build_metadata_reminders
 from src.tool_runner import run_tool_use
 from src.tools import ALL_TOOLS
 from src.api import query_model, create_stream_with_retry
 from src.errors import create_assistant_error_message
-from src.skills import build_skill_reminder
 from src.events import (
     AgentEvent, TextDelta, TextBlock, ThinkingBlock, ToolStart, ToolEnd,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
@@ -36,7 +36,6 @@ from src.display import consume_events, default_handler
 from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
 from src.memory.prompt import build_memory_user_message
-
 
 # ---------------------------------------------------------------------------
 # Low-level agent loop — shared by top-level REPL and sub-agents
@@ -221,26 +220,22 @@ def agent_loop(
     """
     history.add_user(user_input)
 
-    # Inject skill listing as a <system-reminder> user message.
+    # Inject skill + agent listings as <system-reminder> user messages.
     # Mirrors Claude Code's getSkillListingAttachments() pipeline:
-    #   - On the first turn of a session, all skills are announced.
-    #   - On subsequent turns, only newly discovered skills are sent.
+    #   - On the first turn of a session, all skills/agents are announced.
+    #   - On subsequent turns, only newly discovered entries are sent
+    #     (global _sent_* trackers dedupe).
     #   - The listing is a user message (not system prompt) so the
     #     system prompt stays stable and cacheable.
     #
-    # Because the user message we just added and this reminder are
+    # Because the user message we just added and these reminders are
     # both role=user, normalized_for_api() will merge them into a
     # single user turn (content blocks concatenated) — so the API's
     # strict user/assistant alternation is preserved.
-    skill_reminder = build_skill_reminder()
-    if skill_reminder is not None:
-        history.inject_messages([skill_reminder])
-
-    # Inject agent listing — same pattern as skills.
-    from src.agents import build_agent_reminder
-    agent_reminder = build_agent_reminder()
-    if agent_reminder is not None:
-        history.inject_messages([agent_reminder])
+    
+    main_tools = list(ALL_TOOLS.keys())
+    for reminder in build_metadata_reminders(main_tools, use_sent_tracking=True):
+        history.inject_messages([reminder])
 
     # Inject memory context as a <memory-context> user message.
     # Contains: <memory-index> (MEMORY.md index) + <memory-recalled>

@@ -364,3 +364,15 @@ def _join_at_seam(a: list[dict], b: list[dict]) -> list[dict]:
         patched_last = {**last_a, "text": last_a["text"] + "\n"}
         return [*a[:-1], patched_last, *b]
     return [*a, *b]
+
+@dataclass
+class ToolCall:
+    """Represents a single tool call with its input and metadata."""
+    name: str
+    input: dict
+
+@dataclass
+class ToolCallGroup:
+    """Context for a tool call, including the call details and conversation state."""
+    tool_call: list[ToolCall]
+    type: str

@@ -22,7 +22,7 @@ import inspect
 import logging
 from typing import AsyncIterator
 
-from src.types import AsyncGenWithResult, ToolResult, ToolUseContext
+from src.types import AsyncGenWithResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import ALL_TOOLS
 from src.events import AgentEvent
 
@@ -30,46 +30,48 @@ logger = logging.getLogger(__name__)
 
 ToolUseReturn = tuple[ToolResult, str, bool]
 
+def merge_tool_call(tool_name: str, tool_input: dict, groups: list[ToolCallGroup]) -> None:
+    """Group consecutive tool calls by read-only/read-write type."""
+    tool = ALL_TOOLS[tool_name]
+    call_type = "read-only" if tool.is_read_only(tool_input) else "read-write"
+
+    if groups and groups[-1].type == call_type:
+        groups[-1].tool_call.append(ToolCall(name=tool_name, input=tool_input))
+    else:
+        groups.append(ToolCallGroup(tool_call=[ToolCall(name=tool_name, input=tool_input)], type=call_type))
+
+
+
+
 
 def run_tool_use(
     tool_name: str,
     tool_input: dict,
-    tool_use_id: str,
     context: ToolUseContext,
 ) -> AsyncGenWithResult[AgentEvent, ToolUseReturn]:
-    """Look up tool by name, execute, and map result to LLM-readable text.
+    """Execute a single tool, yielding events and producing a result.
 
     Returns an AsyncGenWithResult that:
       - yields AgentEvent objects from generator-based executors
       - sets .result to (ToolResult, llm_text, is_error)
-
-    Regular executors (bash, read_file, grep) are coroutines — no events
-    are yielded.  Generator executors (agent, fork skill) return an
-    AsyncGenWithResult whose events bubble up through the chain.
     """
-    # 1. Check tool exists in global registry
     if tool_name not in ALL_TOOLS:
         return AsyncGenWithResult.of_value(
             (ToolResult(data=None), f"No such tool: '{tool_name}'", True)
         )
 
-    # 2. Use sandboxed version if override exists
     if context.tool_overrides and tool_name in context.tool_overrides:
         tool = context.tool_overrides[tool_name]
-    # 3. Check tool is in the allowed list
     elif tool_name not in context.tools:
         return AsyncGenWithResult.of_value(
             (ToolResult(data=None), f"Tool '{tool_name}' is not available in current context", True)
         )
-    # 4. Allowed — use global version
     else:
         tool = ALL_TOOLS[tool_name]
 
-    # Capture tool ref for the async impl closure
     _tool = tool
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
-        # --- executor ---
         try:
             ret = _tool.executor(tool_input, context)
 
@@ -87,7 +89,6 @@ def run_tool_use(
             run.set_result((ToolResult(data=None), error_text, True))
             return
 
-        # --- map_result ---
         try:
             llm_text = _tool.map_result(result.data)
         except Exception as e:
@@ -97,5 +98,46 @@ def run_tool_use(
             return
 
         run.set_result((result, llm_text, False))
+
+    return AsyncGenWithResult(_impl)
+
+
+def execute_tool_groups(
+    groups: list[ToolCallGroup],
+    context: ToolUseContext,
+) -> AsyncGenWithResult[AgentEvent, list[ToolUseReturn]]:
+    """Batch execute tool groups with concurrency control.
+
+    - read-only groups: concurrent via asyncio.gather, events replayed after completion
+    - read-write groups: sequential with real-time event bubbling
+    """
+
+    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
+        all_results: list[ToolUseReturn] = []
+
+        for group in groups:
+            if group.type == "read-only" and len(group.tool_call) > 1:
+                async def _drain(call: ToolCall) -> tuple[ToolUseReturn, list[AgentEvent]]:
+                    r = run_tool_use(call.name, call.input, context)
+                    events: list[AgentEvent] = []
+                    async for ev in r.events():
+                        events.append(ev)
+                    return r.result, events
+
+                gathered = await asyncio.gather(
+                    *[_drain(c) for c in group.tool_call]
+                )
+                for result, events in gathered:
+                    for ev in events:
+                        yield ev
+                    all_results.append(result)
+            else:
+                for call in group.tool_call:
+                    r = run_tool_use(call.name, call.input, context)
+                    async for ev in r.events():
+                        yield ev
+                    all_results.append(r.result)
+
+        run.set_result(all_results)
 
     return AsyncGenWithResult(_impl)

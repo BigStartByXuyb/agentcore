@@ -37,7 +37,7 @@ Example response: {"selected_memories": ["user_role.md", "project_auth.md"]}
 """
 
 
-def find_relevant_memories(
+async def find_relevant_memories(
     query: str,
     memory_dir: str,
     already_surfaced: set[str] | None = None,
@@ -54,7 +54,6 @@ def find_relevant_memories(
 
     try:
         headers = scan_memory_files(memory_dir)
-        # Filter out already-surfaced files
         headers = [h for h in headers if h.file_path not in surfaced]
 
         if not headers:
@@ -62,7 +61,7 @@ def find_relevant_memories(
 
         manifest = format_memory_manifest(headers)
 
-        response = side_query(
+        response = await side_query(
             model=config.MEMORY_SIDE_QUERY_MODEL,
             system=_SELECT_MEMORIES_SYSTEM_PROMPT,
             messages=[{

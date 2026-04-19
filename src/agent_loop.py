@@ -1,12 +1,12 @@
-"""Agent loop — the main LLM ↔ tool execution cycle.
+"""Agent loop — the main LLM ↔ tool execution cycle (async).
 
 Provides two entry points:
 
   agent_loop()      — top-level REPL entry: manages MessageHistory, injects
                       skill reminders, delegates to run_agent_loop().
-  run_agent_loop()  — low-level generator: takes raw messages + config, runs
-                      the LLM ↔ tool cycle, yields AgentEvent objects, and
-                      returns final text via StopIteration.value.
+  run_agent_loop()  — low-level async generator wrapper: takes raw messages +
+                      config, runs the LLM ↔ tool cycle, yields AgentEvent
+                      objects, and stores final text in .result.
 
 Corresponds to Claude Code's:
   - src/query.ts            → queryLoop() (async generator yielding Messages)
@@ -16,10 +16,15 @@ Corresponds to Claude Code's:
 
 from __future__ import annotations
 
-from typing import Generator
+import asyncio
+import copy
+import logging
+from typing import AsyncIterator
+
+import anthropic.types
 
 from src import config
-from src.types import AgentState, MessageHistory, ToolUseContext
+from src.types import AgentState, AsyncGenWithResult, MessageHistory, ToolUseContext
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import strip_thinking_blocks, filter_orphaned_thinking_messages
@@ -37,6 +42,8 @@ from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
 from src.memory.prompt import build_memory_user_message
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Low-level agent loop — shared by top-level REPL and sub-agents
 # ---------------------------------------------------------------------------
@@ -51,158 +58,170 @@ def run_agent_loop(
     label: str = "main",
     stream: bool = False,
     thinking: dict | None = None,
-) -> Generator[AgentEvent, None, str]:
-    """Run the core LLM ↔ tool execution cycle as a generator.
+) -> AsyncGenWithResult[AgentEvent, str]:
+    """Run the core LLM ↔ tool execution cycle.
 
-    Yields AgentEvent objects for display; returns the final text via
-    StopIteration.value.  Callers use consume_events() to drain the
-    generator and collect the return value.
+    Returns an AsyncGenWithResult that yields AgentEvent objects for
+    display and stores the final text in .result.
 
     Tools are derived from tool_use_context.tools (the single source of
     truth), matching Claude Code's pattern where tools live exclusively
     in toolUseContext.options.tools.
     """
-    if state is None:
-        state = AgentState(agent_id=label)
+    _state = state or AgentState(agent_id=label)
 
-    history = _wrap_messages(messages)
+    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
+        nonlocal tool_use_context
+        history = _wrap_messages(messages)
 
-    # Retry callback — yields RetryNotice events from inside api.py
-    pending_retry_events: list[RetryNotice] = []
+        pending_retry_events: list[RetryNotice] = []
 
-    def _on_retry(delay: float, attempt: int, max_attempts: int) -> None:
-        pending_retry_events.append(RetryNotice(label=label, delay=delay, attempt=attempt, max_attempts=max_attempts))
+        def _on_retry(delay: float, attempt: int, max_attempts: int) -> None:
+            pending_retry_events.append(
+                RetryNotice(label=label, delay=delay, attempt=attempt, max_attempts=max_attempts)
+            )
 
-    for _turn in range(max_turns):
-        # Build tool schemas from the single source of truth each turn
-        tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
+        for _turn in range(max_turns):
+            tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
+            pending_retry_events.clear()
 
-        # --- Call LLM ---
-        pending_retry_events.clear()
+            # --- Call LLM ---
+            try:
+                if stream:
+                    stream_events: list = []
+                    response = await _stream_call(
+                        history, system_prompt, tools, thinking, _on_retry, label, stream_events,
+                    )
+                    for ev in stream_events:
+                        yield ev
+                else:
+                    response = await query_model(
+                        messages=history.normalized_for_api(),
+                        system=system_prompt,
+                        tools=tools,
+                        thinking=thinking,
+                        on_retry=_on_retry,
+                    )
+            except Exception as api_error:
+                for ev in pending_retry_events:
+                    yield ev
 
-        try:
-            if stream:
-                response = yield from _stream_call(
-                    history, system_prompt, tools, thinking, _on_retry, label,
-                )
-            else:
-                response = query_model(
-                    messages=history.normalized_for_api(),
-                    system=system_prompt,
-                    tools=tools,
-                    thinking=thinking,
-                    on_retry=_on_retry,
-                )
-        except Exception as api_error:
-            # Yield any pending retry events first
-            yield from pending_retry_events
-
-            if _is_thinking_400(api_error) and thinking is not None:
-                yield Recovery(label=label, message="Stripping thinking blocks and retrying...")
-                _clean_thinking_history(history.messages)
-                pending_retry_events.clear()
-                try:
-                    if stream:
-                        response = yield from _stream_call(
-                            history, system_prompt, tools, thinking, _on_retry, label,
-                        )
-                    else:
-                        response = query_model(
-                            messages=history.normalized_for_api(),
-                            system=system_prompt,
-                            tools=tools,
-                            thinking=thinking,
-                            on_retry=_on_retry,
-                        )
-                except Exception as retry_error:
-                    yield from pending_retry_events
-                    error_msg = create_assistant_error_message(retry_error)
+                if _is_thinking_400(api_error) and thinking is not None:
+                    yield Recovery(label=label, message="Stripping thinking blocks and retrying...")
+                    _clean_thinking_history(history.messages)
+                    pending_retry_events.clear()
+                    try:
+                        if stream:
+                            stream_events = []
+                            response = await _stream_call(
+                                history, system_prompt, tools, thinking, _on_retry, label, stream_events,
+                            )
+                            for ev in stream_events:
+                                yield ev
+                        else:
+                            response = await query_model(
+                                messages=history.normalized_for_api(),
+                                system=system_prompt,
+                                tools=tools,
+                                thinking=thinking,
+                                on_retry=_on_retry,
+                            )
+                    except Exception as retry_error:
+                        for ev in pending_retry_events:
+                            yield ev
+                        error_msg = create_assistant_error_message(retry_error)
+                        history.add_assistant(error_msg["content"])
+                        error_text = error_msg["content"][0]["text"]
+                        yield ErrorEvent(label=label, error_text=error_text)
+                        run.set_result(error_text)
+                        return
+                else:
+                    error_msg = create_assistant_error_message(api_error)
                     history.add_assistant(error_msg["content"])
                     error_text = error_msg["content"][0]["text"]
                     yield ErrorEvent(label=label, error_text=error_text)
-                    return error_text
-            else:
-                error_msg = create_assistant_error_message(api_error)
-                history.add_assistant(error_msg["content"])
-                error_text = error_msg["content"][0]["text"]
-                yield ErrorEvent(label=label, error_text=error_text)
-                return error_text
+                    run.set_result(error_text)
+                    return
 
-        # Yield any pending retry events
-        yield from pending_retry_events
+            for ev in pending_retry_events:
+                yield ev
 
-        # Track token usage
-        state.total_input_tokens += response.usage.input_tokens
-        state.total_output_tokens += response.usage.output_tokens
-        thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
-        state.total_thinking_tokens += thinking_tokens
+            # Track token usage
+            _state.total_input_tokens += response.usage.input_tokens
+            _state.total_output_tokens += response.usage.output_tokens
+            thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            _state.total_thinking_tokens += thinking_tokens
 
-        # Yield thinking blocks
-        for block in response.content:
-            if getattr(block, "type", None) == "thinking":
-                text = getattr(block, "thinking", "") or ""
-                if text:
-                    yield ThinkingBlock(label=label, thinking=text)
-
-        # Append assistant message
-        assistant_content = _serialize_content(response.content)
-        history.add_assistant(assistant_content)
-
-        # --- end_turn: done ---
-        if response.stop_reason == "end_turn":
-            yield TokenUsage(
-                label=label,
-                input_tokens=state.total_input_tokens,
-                output_tokens=state.total_output_tokens,
-                thinking_tokens=state.total_thinking_tokens,
-            )
-            return extract_text(response.content)
-
-        # --- tool_use: execute and loop ---
-        if response.stop_reason == "tool_use":
-            tool_result_blocks: list[dict] = []
-            all_new_messages: list[dict] = []
-            pending_context_modifier = None
-
+            # Yield thinking blocks
             for block in response.content:
-                if block.type == "tool_use":
-                    yield ToolStart(label=label, tool_name=block.name, tool_input=block.input)
-                    result, llm_text, is_error = yield from run_tool_use(block.name, block.input, block.id, tool_use_context)
-                    yield ToolEnd(label=label, tool_name=block.name, is_error=is_error,
-                                  result_summary=llm_text[:120] if llm_text else "")
-                    tool_result_blocks.append(
-                        build_tool_result_content(block.id, llm_text, is_error=is_error)
-                    )
-                    all_new_messages.extend(result.new_messages)
-                    if result.context_modifier is not None:
-                        pending_context_modifier = result.context_modifier
-                elif block.type == "text" and not stream:
-                    yield TextBlock(label=label, text=block.text)
+                if getattr(block, "type", None) == "thinking":
+                    text = getattr(block, "thinking", "") or ""
+                    if text:
+                        yield ThinkingBlock(label=label, thinking=text)
 
-            _recover_orphan_tool_results(assistant_content, tool_result_blocks)
-            history.add_tool_results(tool_result_blocks)
+            assistant_content = _serialize_content(response.content)
+            history.add_assistant(assistant_content)
 
-            if all_new_messages:
-                history.add_assistant_placeholder()
-                history.inject_messages(all_new_messages)
+            # --- end_turn: done ---
+            if response.stop_reason == "end_turn":
+                yield TokenUsage(
+                    label=label,
+                    input_tokens=_state.total_input_tokens,
+                    output_tokens=_state.total_output_tokens,
+                    thinking_tokens=_state.total_thinking_tokens,
+                )
+                run.set_result(extract_text(response.content))
+                return
 
-            if pending_context_modifier is not None:
-                tool_use_context = pending_context_modifier(tool_use_context)
-                # tools will be rebuilt from tool_use_context.tools at the
-                # top of the next loop iteration — no manual sync needed.
+            # --- tool_use: execute and loop ---
+            if response.stop_reason == "tool_use":
+                tool_result_blocks: list[dict] = []
+                all_new_messages: list[dict] = []
+                pending_context_modifier = None
 
-            continue
+                for block in response.content:
+                    if block.type == "tool_use":
+                        yield ToolStart(label=label, tool_name=block.name, tool_input=block.input)
+                        tool_gen = run_tool_use(block.name, block.input, block.id, tool_use_context)
+                        async for ev in tool_gen.events():
+                            yield ev
+                        result, llm_text, is_error = tool_gen.result
+                        yield ToolEnd(label=label, tool_name=block.name, is_error=is_error,
+                                      result_summary=llm_text[:120] if llm_text else "")
+                        tool_result_blocks.append(
+                            build_tool_result_content(block.id, llm_text, is_error=is_error)
+                        )
+                        all_new_messages.extend(result.new_messages)
+                        if result.context_modifier is not None:
+                            pending_context_modifier = result.context_modifier
+                    elif block.type == "text" and not stream:
+                        yield TextBlock(label=label, text=block.text)
 
-        return f"[Unexpected stop_reason: {response.stop_reason}]"
+                _recover_orphan_tool_results(assistant_content, tool_result_blocks)
+                history.add_tool_results(tool_result_blocks)
 
-    return f"[Agent loop '{label}' reached max turns ({max_turns})]"
+                if all_new_messages:
+                    history.add_assistant_placeholder()
+                    history.inject_messages(all_new_messages)
+
+                if pending_context_modifier is not None:
+                    tool_use_context = pending_context_modifier(tool_use_context)
+
+                continue
+
+            run.set_result(f"[Unexpected stop_reason: {response.stop_reason}]")
+            return
+
+        run.set_result(f"[Agent loop '{label}' reached max turns ({max_turns})]")
+
+    return AsyncGenWithResult(_impl)
 
 
 # ---------------------------------------------------------------------------
 # Top-level entry point — called from main.py REPL
 # ---------------------------------------------------------------------------
 
-def agent_loop(
+async def agent_loop(
     user_input: str,
     history: MessageHistory,
     state: AgentState,
@@ -211,38 +230,14 @@ def agent_loop(
 
     `history` is the persistent conversation state shared across turns.
     The caller (main.py REPL) owns it; we mutate via its typed helpers.
-    This mirrors Claude Code's queryLoop() which receives params.messages
-    from the outer REPL and accumulates across the session.
-
-    1. Append user message to the shared history
-    2. Inject skill listing as <system-reminder> user message
-    3. Delegate to run_agent_loop() for the LLM ↔ tool cycle
     """
     history.add_user(user_input)
 
-    # Inject skill + agent listings as <system-reminder> user messages.
-    # Mirrors Claude Code's getSkillListingAttachments() pipeline:
-    #   - On the first turn of a session, all skills/agents are announced.
-    #   - On subsequent turns, only newly discovered entries are sent
-    #     (global _sent_* trackers dedupe).
-    #   - The listing is a user message (not system prompt) so the
-    #     system prompt stays stable and cacheable.
-    #
-    # Because the user message we just added and these reminders are
-    # both role=user, normalized_for_api() will merge them into a
-    # single user turn (content blocks concatenated) — so the API's
-    # strict user/assistant alternation is preserved.
-    
     main_tools = list(ALL_TOOLS.keys())
     for reminder in build_metadata_reminders(main_tools, use_sent_tracking=True):
         history.inject_messages([reminder])
 
-    # Inject memory context as a <memory-context> user message.
-    # Contains: <memory-index> (MEMORY.md index) + <memory-recalled>
-    # (relevant memory file contents selected by side query).
-    # Keeping this in user messages instead of system prompt ensures
-    # the system prompt stays stable and cacheable.
-    _inject_memory_context(user_input, history)
+    await _inject_memory_context(user_input, history)
 
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
@@ -250,8 +245,6 @@ def agent_loop(
         tools=list(ALL_TOOLS.keys()),
     )
 
-    # Record message count before this turn — used by memory extraction
-    # to only check messages added during this turn.
     turn_start_index = len(history)
 
     gen = run_agent_loop(
@@ -264,32 +257,23 @@ def agent_loop(
         stream=True,
         thinking=_build_thinking_param(),
     )
-    result = consume_events(gen, default_handler)
+    result = await consume_events(gen, default_handler)
 
-    # Trigger background memory extraction after the main agent finishes.
-    # Runs in a background thread so the user can start typing immediately.
-    # Mirrors Claude Code's handleStopHooks() → extractMemories() pipeline
-    # which runs as a forked (non-blocking) agent.
-    # Snapshot messages to avoid race with the next user turn.
-    # Deep copy because message dicts contain mutable nested structures
-    # (content block lists) that could theoretically be modified.
-    import copy
-    import threading
+    # Background memory extraction — fire-and-forget asyncio task
     from src.memory.extract import run_memory_extraction
 
     messages_snapshot = copy.deepcopy(history.messages)
 
-    def _run_extraction():
+    async def _run_extraction():
         try:
             extraction_gen = run_memory_extraction(
                 messages_snapshot, get_memory_dir(), since_index=turn_start_index,
             )
-            consume_events(extraction_gen, lambda _e: None)
+            await consume_events(extraction_gen, lambda _e: None)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).debug("Background memory extraction failed: %s", e)
+            logger.debug("Background memory extraction failed: %s", e)
 
-    threading.Thread(target=_run_extraction, daemon=True).start()
+    asyncio.create_task(_run_extraction())
 
     return result
 
@@ -298,18 +282,20 @@ def agent_loop(
 # Streaming helper — real-time text delta yielding
 # ---------------------------------------------------------------------------
 
-def _stream_call(
+async def _stream_call(
     history: MessageHistory,
     system_prompt: str,
     tools: list[dict],
     thinking: dict | None,
     on_retry: callable | None,
     label: str,
-) -> Generator[AgentEvent, None, object]:
-    """Call the streaming API and yield TextDelta events in real-time.
+    emit: list,
+) -> anthropic.types.Message:
+    """Call the streaming API, collect TextDelta events, return final Message.
 
-    Returns the final Message object via StopIteration.value.
-    This is a sub-generator used by run_agent_loop via `yield from`.
+    TextDelta events are appended to `emit` (a list the caller drains
+    after awaiting this coroutine).  This avoids the problem of not
+    being able to yield from a sub-coroutine.
     """
     stream_cm = create_stream_with_retry(
         messages=history.normalized_for_api(),
@@ -318,12 +304,12 @@ def _stream_call(
         thinking=thinking,
         on_retry=on_retry,
     )
-    with stream_cm as api_stream:
+    async with stream_cm as api_stream:
         _first = True
-        for text in api_stream.text_stream:
-            yield TextDelta(label=label, delta=text, first=_first)
+        async for text in api_stream.text_stream:
+            emit.append(TextDelta(label=label, delta=text, first=_first))
             _first = False
-        return api_stream.get_final_message()
+        return await api_stream.get_final_message()
 
 
 # ---------------------------------------------------------------------------
@@ -459,49 +445,35 @@ def _clean_thinking_history(messages: list[dict]) -> None:
 # Memory helpers
 # ---------------------------------------------------------------------------
 
-def _read_memory_files(headers: list) -> list[str]:
-    """Read body content (without frontmatter) of selected memory files.
-
-    Returns a list of `[filename] body` strings.  Skips files that
-    can't be read.  Each file is capped at 4000 chars to avoid
-    blowing up context.  Frontmatter is stripped because the index
-    already carries name/type/description — no need to repeat it.
-    """
+async def _read_memory_files(headers: list) -> list[str]:
+    """Read body content (without frontmatter) of selected memory files."""
     from src.frontmatter import parse_frontmatter
 
-    texts: list[str] = []
-    for h in headers:
-        try:
-            with open(h.file_path, "r", encoding="utf-8", errors="replace") as f:
-                raw = f.read(4000)
-            _, body = parse_frontmatter(raw)
-            body = body.strip()
-            if body:
-                texts.append(f"[{h.filename}]\n{body}")
-        except OSError:
-            continue
-    return texts
+    def _read_sync() -> list[str]:
+        texts: list[str] = []
+        for h in headers:
+            try:
+                with open(h.file_path, "r", encoding="utf-8", errors="replace") as f:
+                    raw = f.read(4000)
+                _, body = parse_frontmatter(raw)
+                body = body.strip()
+                if body:
+                    texts.append(f"[{h.filename}]\n{body}")
+            except OSError:
+                continue
+        return texts
+
+    return await asyncio.to_thread(_read_sync)
 
 
-def _inject_memory_context(user_input: str, history: MessageHistory) -> None:
-    """Build and inject the <memory-context> user message for this turn.
-
-    Combines two parts:
-      - <memory-index>: MEMORY.md index (always present if memory enabled)
-      - <memory-recalled>: full content of relevant memory files (side query)
-
-    Both are wrapped in <memory-context> and injected as a single user
-    message.  The system prompt explains these tags so the LLM knows
-    what they mean.
-    """
+async def _inject_memory_context(user_input: str, history: MessageHistory) -> None:
+    """Build and inject the <memory-context> user message for this turn."""
     mem_dir = get_memory_dir()
 
-    # Part 1: memory index
     index_content = build_memory_user_message(mem_dir)
 
-    # Part 2: recalled memory file contents
-    relevant_memories = find_relevant_memories(user_input, mem_dir)
-    recalled_texts = _read_memory_files(relevant_memories) if relevant_memories else []
+    relevant_memories = await find_relevant_memories(user_input, mem_dir)
+    recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
 
     # Nothing to inject
     if not index_content and not recalled_texts:

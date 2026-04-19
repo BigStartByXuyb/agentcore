@@ -1,8 +1,8 @@
-"""Grep tool — search file contents with regex patterns."""
+"""Grep tool — search file contents with regex patterns (async)."""
 
 from __future__ import annotations
 
-import subprocess
+import asyncio
 import shutil
 
 from src.types import ToolResult, ToolDef, ToolUseContext
@@ -60,7 +60,7 @@ def _build_grep_command(pattern: str, path: str | None, glob: str | None) -> lis
     return cmd
 
 
-def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
+async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     pattern: str = inputs["pattern"]
     path: str | None = inputs.get("path")
     glob: str | None = inputs.get("glob")
@@ -71,11 +71,10 @@ def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         cmd = _build_grep_command(pattern, path, glob)
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
         return ToolResult(data={
@@ -83,14 +82,22 @@ def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "num_matches": 0,
             "content": "Error: neither 'rg' nor 'grep' found on PATH.",
         })
-    except subprocess.TimeoutExpired:
+
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
         return ToolResult(data={
             "num_files": 0,
             "num_matches": 0,
             "content": "Search timed out after 30s.",
         })
 
-    output = proc.stdout.strip()
+    output = stdout_bytes.decode("utf-8", errors="replace").strip()
     if not output:
         return ToolResult(data={
             "num_files": 0,

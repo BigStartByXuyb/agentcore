@@ -1,18 +1,16 @@
-"""Default terminal display handler for agent events.
+"""Default terminal display handler for agent events (async).
 
 Provides:
-  - default_handler()  — prints events to stdout (the current print logic)
-  - consume_events()   — drains a run_agent_loop generator, dispatches events,
-                         returns the final text
-
-This module is the ONLY place in the codebase that prints agent output.
-The agent loop itself yields events; this module decides how to render them.
+  - default_handler()  — prints events to stdout
+  - consume_events()   — drains an AsyncGenWithResult, dispatches events,
+                         returns the final value
 """
 
 from __future__ import annotations
 
-from typing import Callable, Generator
+from typing import Callable
 
+from src.types import AsyncGenWithResult
 from src.events import (
     AgentEvent,
     TextDelta,
@@ -88,22 +86,15 @@ def default_handler(event: AgentEvent) -> None:
 # Event consumer
 # ---------------------------------------------------------------------------
 
-def consume_events(
-    gen: Generator[AgentEvent, None, str],
+async def consume_events(
+    gen: AsyncGenWithResult,
     handler: Callable[[AgentEvent], None] | None = None,
-) -> str:
-    """Drain a run_agent_loop generator, dispatch events, return final text.
-
-    If handler is None, events are silently discarded (useful for sub-agents
-    that should not produce terminal output).
-    """
-    try:
-        while True:
-            event = next(gen)
-            if handler is not None:
-                handler(event)
-    except StopIteration as e:
-        return e.value
+):
+    """Drain an AsyncGenWithResult, dispatch events, return final value."""
+    async for event in gen.events():
+        if handler is not None:
+            handler(event)
+    return gen.result
 
 
 # ---------------------------------------------------------------------------

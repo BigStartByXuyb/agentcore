@@ -1,7 +1,8 @@
-"""Read file tool — read file contents with line numbers."""
+"""Read file tool — read file contents with line numbers (async)."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
@@ -40,7 +41,13 @@ SCHEMA: dict = {
 DEFAULT_LIMIT = 2000
 
 
-def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
+def _read_lines_sync(file_path: str) -> list[str]:
+    """Blocking I/O helper — called via asyncio.to_thread."""
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.readlines()
+
+
+async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     file_path: str = inputs["file_path"]
     offset: int = inputs.get("offset", 0)
     limit: int = inputs.get("limit", DEFAULT_LIMIT)
@@ -60,8 +67,7 @@ def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         })
 
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
+        all_lines = await asyncio.to_thread(_read_lines_sync, file_path)
     except Exception as e:
         return ToolResult(data={
             "type": "error",

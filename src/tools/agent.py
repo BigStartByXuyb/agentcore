@@ -13,8 +13,16 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
+from typing import AsyncIterator
+
 from src import config
-from src.types import ToolDef, ToolResult, ToolUseContext, AgentState
+from src.types import (
+    AgentState,
+    AsyncGenWithResult,
+    ToolDef,
+    ToolResult,
+    ToolUseContext,
+)
 from src.agents import get_agent, list_agents, AgentDefinition
 
 
@@ -117,40 +125,42 @@ def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
     return tools
 
 
-def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
+def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
     """Launch a sub-agent to execute the given prompt."""
     prompt = inputs.get("prompt", "").strip()
     description = inputs.get("description", "").strip()
     agent_type = inputs.get("agent_type", "").strip()
 
     if not prompt:
-        return ToolResult(data={"success": False, "error": "No prompt provided"})
+        return AsyncGenWithResult.of_value(
+            ToolResult(data={"success": False, "error": "No prompt provided"})
+        )
 
     # --- Resolve agent definition ---
     if agent_type:
         agent_def = get_agent(agent_type)
         if agent_def is None:
             available = ", ".join(a.name for a in list_agents())
-            return ToolResult(data={
+            return AsyncGenWithResult.of_value(ToolResult(data={
                 "success": False,
                 "error": (
                     f"Unknown agent type: '{agent_type}'. "
                     f"Available: {available}, general-purpose"
                 ),
-            })
+            }))
     else:
         agent_def = _DEFAULT_AGENT
 
     # --- Depth check ---
     if context.depth >= config.MAX_AGENT_DEPTH:
-        return ToolResult(data={
+        return AsyncGenWithResult.of_value(ToolResult(data={
             "success": False,
             "agent_name": agent_def.name,
             "error": (
                 f"Maximum agent nesting depth ({config.MAX_AGENT_DEPTH}) reached. "
                 f"Cannot launch agent '{agent_def.name}' at depth {context.depth}."
             ),
-        })
+        }))
 
     # --- Build tool name list ---
     sub_tool_names = _resolve_tools(agent_def)
@@ -160,13 +170,6 @@ def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         {"role": "user", "content": prompt}
     ]
 
-    # --- Inject skill + agent listings so the sub-agent knows what's available ---
-    # use_sent_tracking=False: sub-agent has an independent context; we must
-    #   build the full listing here AND not mutate the main agent's global
-    #   _sent_* trackers.
-    # skill_filter=agent_def.skills: per-agent precise mode (None = all skills).
-    # exclude_fork_skills=True: sub-agents shouldn't spawn fork skills (would
-    #   create nested agent loops).
     from src.messages import build_metadata_reminders  # local to avoid circular
 
     initial_messages.extend(build_metadata_reminders(
@@ -186,34 +189,38 @@ def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     # --- Sub-agent state ---
     sub_state = AgentState(agent_id=f"agent:{agent_def.name}")
-
-    # --- Run ---
     label = f"agent:{agent_def.name}"
 
-    try:
-        from src.agent_loop import run_agent_loop  # local import to avoid circular
+    async def _impl(run: AsyncGenWithResult) -> AsyncIterator:
+        try:
+            from src.agent_loop import run_agent_loop  # local import to avoid circular
 
-        gen = run_agent_loop(
-            messages=initial_messages,
-            system_prompt=agent_def.system_prompt,
-            tool_use_context=sub_context,
-            max_turns=agent_def.max_turns,
-            state=sub_state,
-            label=label,
-        )
-        result_text = yield from gen  # bubble sub-agent events to parent
-    except Exception as e:
-        return ToolResult(data={
-            "success": False,
+            gen = run_agent_loop(
+                messages=initial_messages,
+                system_prompt=agent_def.system_prompt,
+                tool_use_context=sub_context,
+                max_turns=agent_def.max_turns,
+                state=sub_state,
+                label=label,
+            )
+            async for ev in gen.events():
+                yield ev
+            result_text = gen.result
+        except Exception as e:
+            run.set_result(ToolResult(data={
+                "success": False,
+                "agent_name": agent_def.name,
+                "error": f"Agent execution failed: {e}",
+            }))
+            return
+
+        run.set_result(ToolResult(data={
+            "success": True,
             "agent_name": agent_def.name,
-            "error": f"Agent execution failed: {e}",
-        })
+            "result": result_text,
+        }))
 
-    return ToolResult(data={
-        "success": True,
-        "agent_name": agent_def.name,
-        "result": result_text,
-    })
+    return AsyncGenWithResult(_impl)
 
 
 # ---------------------------------------------------------------------------

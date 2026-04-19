@@ -1,4 +1,4 @@
-"""Background memory extraction — runs after each turn.
+"""Background memory extraction — runs after each turn (async).
 
 Corresponds to Claude Code's src/services/extractMemories/extractMemories.ts.
 
@@ -6,22 +6,15 @@ After the main agent produces a final response (end_turn), this module
 runs a forked agent that reviews the conversation and extracts durable
 memories worth saving.  The forked agent uses a restricted tool set
 (only bash for writing files).
-
-Key design decisions (matching Claude Code):
-  - Mutual exclusivity: if the main agent already wrote to memory this
-    turn, extraction is skipped.
-  - Minimum threshold: at least 4 messages before extraction triggers.
-  - The extraction agent is a generator that yields AgentEvent objects,
-    consumed silently by the caller.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Generator
+from typing import AsyncIterator
 
 from src import config
-from src.types import AgentState, ToolResult, ToolDef, ToolUseContext
+from src.types import AgentState, AsyncGenWithResult, ToolResult, ToolDef, ToolUseContext
 from src.events import AgentEvent
 from src.memory.paths import get_memory_dir, get_memory_dir_display, ensure_memory_dir
 from src.memory.scan import scan_memory_files, format_memory_manifest
@@ -41,11 +34,10 @@ def _make_sandboxed_bash(memory_dir: str) -> ToolDef:
 
     mem_dir_fwd = memory_dir.replace("\\", "/")
 
-    def sandboxed_executor(inputs: dict, context: ToolUseContext) -> ToolResult:
+    async def sandboxed_executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         command: str = inputs.get("command", "")
         cmd_normalized = command.replace("\\", "/")
 
-        # Must reference the memory directory — reject anything else
         if mem_dir_fwd not in cmd_normalized:
             return ToolResult(data={
                 "stdout": "",
@@ -57,7 +49,7 @@ def _make_sandboxed_bash(memory_dir: str) -> ToolDef:
                 "interrupted": False,
             })
 
-        return real_executor(inputs, context)
+        return await real_executor(inputs, context)
 
     return ToolDef(
         schema=SCHEMA,
@@ -114,38 +106,26 @@ def run_memory_extraction(
     messages: list[dict],
     memory_dir: str | None = None,
     since_index: int = 0,
-) -> Generator[AgentEvent, None, None]:
+) -> AsyncGenWithResult[AgentEvent, None]:
     """Extract memories from conversation, yielding events silently.
 
-    This is a generator — the caller should consume it with
-    consume_events(gen, lambda e: None) for silent execution.
-
-    Args:
-        since_index: Only check messages from this index onwards for
-                     memory writes (avoids false positives from prior turns).
-
-    Skips extraction if:
-      - Memory is disabled
-      - Too few messages
-      - Main agent already wrote to memory this turn
+    Returns an AsyncGenWithResult — the caller should consume it with
+    await consume_events(gen, lambda e: None) for silent execution.
     """
     if not config.MEMORY_ENABLED:
-        return
+        return AsyncGenWithResult.of_value(None)
 
     mem_dir = memory_dir or get_memory_dir()
 
-    # Check minimum message threshold
     if len(messages) < _MIN_MESSAGES:
-        return
+        return AsyncGenWithResult.of_value(None)
 
-    # Check mutual exclusivity — did the main agent write to memory this turn?
     if _has_memory_writes(messages, mem_dir, since_index):
         logger.debug("Skipping extraction: main agent already wrote to memory")
-        return
+        return AsyncGenWithResult.of_value(None)
 
     ensure_memory_dir()
 
-    # Build extraction prompt with current memory manifest
     headers = scan_memory_files(mem_dir)
     manifest = format_memory_manifest(headers) if headers else "(no existing memories)"
 
@@ -154,7 +134,6 @@ def run_memory_extraction(
         manifest=manifest,
     )
 
-    # Build conversation summary for the extraction agent
     conversation_text = _summarize_conversation(messages)
 
     extraction_messages = [{
@@ -166,36 +145,36 @@ def run_memory_extraction(
         ),
     }]
 
-    # Import here to avoid circular dependency
-    from src.agent_loop import run_agent_loop
-
-    # Sandboxed bash — only allows writes to memory directory
     sandboxed_bash = _make_sandboxed_bash(mem_dir)
 
-    # Restricted tool set — only sandboxed bash for file writing
     tool_use_context = ToolUseContext(
         messages=extraction_messages,
         tools=["bash"],
-        depth=1,  # prevent sub-agent spawning
+        depth=1,
         tool_overrides={"bash": sandboxed_bash},
     )
 
-    gen = run_agent_loop(
-        messages=extraction_messages,
-        system_prompt=system_prompt,
-        tool_use_context=tool_use_context,
-        max_turns=5,
-        state=AgentState(agent_id="memory-extraction"),
-        label="memory-extraction",
-        stream=False,
-    )
+    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
+        from src.agent_loop import run_agent_loop
 
-    # Yield all events from the extraction agent (caller consumes silently)
-    try:
-        yield from gen
-    except Exception as e:
-        logger.debug("Memory extraction failed (non-critical): %s", e)
-    return
+        gen = run_agent_loop(
+            messages=extraction_messages,
+            system_prompt=system_prompt,
+            tool_use_context=tool_use_context,
+            max_turns=5,
+            state=AgentState(agent_id="memory-extraction"),
+            label="memory-extraction",
+            stream=False,
+        )
+        try:
+            async for ev in gen.events():
+                yield ev
+            run.set_result(None)
+        except Exception as e:
+            logger.debug("Memory extraction failed (non-critical): %s", e)
+            run.set_result(None)
+
+    return AsyncGenWithResult(_impl)
 
 
 def _has_memory_writes(messages: list[dict], memory_dir: str, since_index: int = 0) -> bool:

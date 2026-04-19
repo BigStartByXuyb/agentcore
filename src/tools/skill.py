@@ -24,8 +24,16 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
+from typing import AsyncIterator
+
 from src import config
-from src.types import ToolDef, ToolResult, ToolUseContext, AgentState
+from src.types import (
+    AgentState,
+    AsyncGenWithResult,
+    ToolDef,
+    ToolResult,
+    ToolUseContext,
+)
 from src.skills import get_skill, build_skill_content
 
 
@@ -69,21 +77,28 @@ SKILL_SCHEMA = {
 # Executor — dispatches to inline or fork mode
 # ---------------------------------------------------------------------------
 
-def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
+def _execute(
+    inputs: dict,
+    context: ToolUseContext,
+) -> AsyncGenWithResult:
     """Execute a skill by name.
 
     Inline mode (is_fork=False):
-      Returns ToolResult with new_messages containing the skill content
-      wrapped in <skill-content> tags, plus a context_modifier that
-      restricts available tools if allow_tools is set.
+      Returns an AsyncGenWithResult whose .result is a ToolResult with
+      new_messages containing the skill content wrapped in <skill-content>
+      tags, plus a context_modifier that restricts tools if allow_tools
+      is set.  No events are yielded.
 
     Fork mode (is_fork=True):
-      Launches an isolated sub-agent loop, waits for completion,
-      returns the result text in ToolResult.data.
+      Returns an AsyncGenWithResult that yields sub-agent events as they
+      happen and, on completion, sets .result to a ToolResult containing
+      the final text.
     """
     skill_name = inputs.get("skill", "").strip()
     if not skill_name:
-        return ToolResult(data={"success": False, "error": "No skill name provided"})
+        return AsyncGenWithResult.of_value(
+            ToolResult(data={"success": False, "error": "No skill name provided"})
+        )
 
     # Strip leading slash for compatibility ("/commit" → "commit")
     if skill_name.startswith("/"):
@@ -91,25 +106,27 @@ def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     skill = get_skill(skill_name)
     if skill is None:
-        return ToolResult(data={"success": False, "error": f"Unknown skill: {skill_name}"})
+        return AsyncGenWithResult.of_value(
+            ToolResult(data={"success": False, "error": f"Unknown skill: {skill_name}"})
+        )
 
     # --- Fork mode ---
     # Fork skills launch a sub-agent loop, which increases depth.
     # Block only when we've already hit the maximum nesting depth.
     if skill.is_fork:
         if context.depth >= config.MAX_AGENT_DEPTH:
-            return ToolResult(data={
+            return AsyncGenWithResult.of_value(ToolResult(data={
                 "success": False,
                 "error": (
                     f"Fork skill '{skill_name}' cannot be invoked: "
                     f"maximum agent depth ({config.MAX_AGENT_DEPTH}) reached "
                     f"(current depth: {context.depth})."
                 ),
-            })
-        return (yield from _execute_fork(skill, inputs, context))
+            }))
+        return _execute_fork(skill, inputs, context)
 
     # --- Inline mode ---
-    return _execute_inline(skill, inputs, context)
+    return AsyncGenWithResult.of_value(_execute_inline(skill, inputs, context))
 
 
 # ---------------------------------------------------------------------------
@@ -164,45 +181,26 @@ def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
 # Fork mode — launch an isolated sub-agent loop
 # ---------------------------------------------------------------------------
 
-def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
+def _execute_fork(
+    skill,
+    inputs: dict,
+    context: ToolUseContext,
+) -> AsyncGenWithResult:
     """Fork execution: run skill in an isolated sub-agent loop.
 
+    Returns an AsyncGenWithResult that:
+      - yields each AgentEvent from the sub-agent loop (bubbling up)
+      - on completion, sets .result to the final ToolResult
+
     Mirrors executeForkedSkill() in SkillTool.ts + prepareForkedCommandContext()
-    in forkedAgent.ts:
-
-      1. Check depth limit (prevent infinite recursion)
-      2. Build skill content with $ARGUMENTS substitution
-      3. Construct initial messages (single user message with <skill-content>)
-      4. Build sub-agent system prompt
-      5. Build tool schemas (respecting allowed_tools whitelist)
-      6. Launch run_agent_loop() with isolated state
-      7. Return result text in ToolResult.data
-
-    The fork skill runs synchronously — _execute_fork blocks until the
-    sub-agent completes.  No new_messages or context_modifier are returned;
-    the parent conversation only sees the final result text.
+    in forkedAgent.ts.
     """
-    # --- Depth check ---
-    if context.depth >= config.MAX_AGENT_DEPTH:
-        return ToolResult(
-            data={
-                "success": False,
-                "commandName": skill.name,
-                "error": (
-                    f"Maximum agent nesting depth ({config.MAX_AGENT_DEPTH}) reached. "
-                    f"Cannot fork skill '{skill.name}' at depth {context.depth}."
-                ),
-            }
-        )
-
-    # --- Build skill content ---
+    # --- Build skill content (cheap, do it outside the async impl) ---
     content = build_skill_content(skill)
     args = inputs.get("args", "")
     if args:
         content = content.replace("$ARGUMENTS", args)
 
-    # --- Initial messages for the sub-agent ---
-    # Mirrors prepareForkedCommandContext() → promptMessages
     initial_messages: list[dict] = [
         {
             "role": "user",
@@ -216,7 +214,6 @@ def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
         }
     ]
 
-    # --- Sub-agent system prompt ---
     sub_system_prompt = (
         f"You are a sub-agent executing the '{skill.name}' skill.\n"
         "Follow the skill instructions precisely.\n"
@@ -224,19 +221,13 @@ def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
         "When finished, provide a clear, concise result.\n"
     )
 
-    # --- Tool names (respect allowed_tools whitelist) ---
     from src.tools import ALL_TOOLS  # local import to avoid circular
 
     if skill.allowed_tools:
         sub_tool_names = list(skill.allowed_tools)
     else:
-        # No restriction — use all tools except Skill (prevent recursion via prompt)
         sub_tool_names = list(ALL_TOOLS.keys())
 
-    # --- Inject skill + agent listings if those tools are available ---
-    # Same pattern as tools/agent.py: fresh sub-agent context, no global
-    # tracker mutation. exclude_fork_skills=True prevents fork-skill→fork-skill
-    # recursion via the Skill tool.
     from src.messages import build_metadata_reminders  # local to avoid circular
 
     initial_messages.extend(build_metadata_reminders(
@@ -245,7 +236,6 @@ def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
         exclude_fork_skills=True,
     ))
 
-    # --- Sub-agent context ---
     sub_context = ToolUseContext(
         messages=initial_messages,
         tools=sub_tool_names,
@@ -253,44 +243,41 @@ def _execute_fork(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
         abort_signal=context.abort_signal,
     )
 
-    # --- Sub-agent state (isolated token tracking) ---
     sub_state = AgentState(agent_id=f"fork:{skill.name}")
-
-    # --- Run the sub-agent loop ---
     label = f"fork:{skill.name}"
 
-    try:
-        from src.agent_loop import run_agent_loop  # local import to avoid circular
+    async def _impl(run: AsyncGenWithResult) -> AsyncIterator:
+        try:
+            from src.agent_loop import run_agent_loop  # local import to avoid circular
 
-        gen = run_agent_loop(
-            messages=initial_messages,
-            system_prompt=sub_system_prompt,
-            tool_use_context=sub_context,
-            max_turns=config.MAX_TURNS,
-            state=sub_state,
-            label=label,
-        )
-        result_text = yield from gen  # bubble sub-agent events to parent
-    except Exception as e:
-        return ToolResult(
-            data={
+            gen = run_agent_loop(
+                messages=initial_messages,
+                system_prompt=sub_system_prompt,
+                tool_use_context=sub_context,
+                max_turns=config.MAX_TURNS,
+                state=sub_state,
+                label=label,
+            )
+            async for ev in gen.events():
+                yield ev
+            result_text = gen.result
+        except Exception as e:
+            run.set_result(ToolResult(data={
                 "success": False,
                 "commandName": skill.name,
                 "error": f"Fork execution failed: {e}",
-            }
-        )
+            }))
+            return
 
-    return ToolResult(
-        data={
+        run.set_result(ToolResult(data={
             "success": True,
             "commandName": skill.name,
             "status": "forked",
             "agentId": sub_state.agent_id,
             "result": result_text,
-        }
-        # No new_messages — result is in data.result
-        # No context_modifier — parent context unchanged
-    )
+        }))
+
+    return AsyncGenWithResult(_impl)
 
 
 # ---------------------------------------------------------------------------

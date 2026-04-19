@@ -1,8 +1,8 @@
-"""Bash tool — execute shell commands."""
+"""Bash tool — execute shell commands (async)."""
 
 from __future__ import annotations
 
-import subprocess
+import asyncio
 import shutil
 import re
 
@@ -37,7 +37,7 @@ _HAS_BASH = shutil.which("bash") is not None
 DEFAULT_TIMEOUT_MS = 120_000
 
 
-def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
+async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     command: str = inputs["command"]
     timeout_ms: int = inputs.get("timeout", DEFAULT_TIMEOUT_MS)
     timeout_sec = timeout_ms / 1000
@@ -48,26 +48,34 @@ def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         shell_cmd = ["cmd", "/c", command]
 
     try:
-        proc = subprocess.run(
-            shell_cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_sec,
+        proc = await asyncio.create_subprocess_exec(
+            *shell_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            # Best effort: kill the runaway process before returning
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            return ToolResult(data={
+                "stdout": "",
+                "stderr": f"Command timed out after {timeout_sec}s",
+                "exit_code": -1,
+                "interrupted": True,
+            })
+
         return ToolResult(data={
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout": stdout_bytes.decode("utf-8", errors="replace"),
+            "stderr": stderr_bytes.decode("utf-8", errors="replace"),
             "exit_code": proc.returncode,
             "interrupted": False,
-        })
-    except subprocess.TimeoutExpired:
-        return ToolResult(data={
-            "stdout": "",
-            "stderr": f"Command timed out after {timeout_sec}s",
-            "exit_code": -1,
-            "interrupted": True,
         })
     except Exception as e:
         return ToolResult(data={

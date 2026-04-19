@@ -1,5 +1,6 @@
-"""CLI entry point for the agent."""
+"""CLI entry point for the agent (async)."""
 
+import asyncio
 import io
 import sys
 
@@ -21,22 +22,21 @@ from src.types import AgentState, MessageHistory
 from src.mcp_tool import register_mcp_tools
 from src.tools import ALL_TOOLS
 
-def main() -> None:
+
+async def async_main() -> None:
     if not config.ANTHROPIC_AUTH_TOKEN:
         print("Error: ANTHROPIC_AUTH_TOKEN environment variable is not set.")
         sys.exit(1)
 
     print("my-agent ready. Type 'exit' to quit.\n")
 
-    # Persistent conversation state — survives across user turns.
-    # Mirrors Claude Code's REPL which owns the messages array and
-    # passes it into queryLoop() each turn.
     history = MessageHistory()
     state = AgentState()
     register_mcp_tools(ALL_TOOLS)
+
     while True:
         try:
-            user_input = input("> ")
+            user_input = await asyncio.to_thread(input, "> ")
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             break
@@ -49,14 +49,13 @@ def main() -> None:
             break
 
         try:
-            # agent_loop() uses streaming — text is already printed to
-            # the terminal in real-time via the on_text callback inside
-            # run_agent_loop().  We only need the return value for
-            # potential programmatic use; printing it again would
-            # duplicate the output.
-            agent_loop(stripped, history, state)
+            await agent_loop(stripped, history, state)
         except Exception as e:
             print(f"\n[Error] {e}")
+
+
+def main() -> None:
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":

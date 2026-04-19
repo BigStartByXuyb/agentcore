@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 class McpServerConfig:
     """A single MCP server definition."""
     name: str
+    type: str
+    url: str
     command: str
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
@@ -73,9 +75,8 @@ def _parse_mcp_file(path: Path, scope: str) -> list[McpServerConfig]:
             continue
 
         command = server_def.get("command")
-        if not command or not isinstance(command, str):
-            logger.warning("Server '%s' missing 'command' in %s", name, path)
-            continue
+        if not isinstance(command, str):
+            command = ""
 
         args = server_def.get("args", [])
         if not isinstance(args, list):
@@ -85,8 +86,18 @@ def _parse_mcp_file(path: Path, scope: str) -> list[McpServerConfig]:
         if not isinstance(env, dict):
             env = {}
 
+        connect_type = server_def.get("type", "")
+        if not isinstance(connect_type, str):
+            connect_type = ""
+
+        url = server_def.get("url", "")
+        if not isinstance(url, str):
+            url = ""
+
         configs.append(McpServerConfig(
             name=name,
+            type=connect_type,
+            url=url,
             command=command,
             args=[str(a) for a in args],
             env=_expand_env_vars(env),
@@ -126,6 +137,8 @@ def load_mcp_configs(
 
     # Deduplicate: project overrides global (by server name)
     by_name: dict[str, McpServerConfig] = {}
+
+    # Later ones override earlier ones, so global goes first, then project
     for cfg in global_configs:
         by_name[cfg.name] = cfg
     for cfg in project_configs:

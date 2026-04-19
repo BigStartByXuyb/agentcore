@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 def run_agent_loop(
     *,
     messages: list[dict],
+    memory_task: asyncio.Task[dict] | None = None,
     system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
@@ -71,7 +72,7 @@ def run_agent_loop(
     _state = state or AgentState(agent_id=label)
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
-        nonlocal tool_use_context
+        nonlocal tool_use_context, memory_task
         history = _wrap_messages(messages)
 
         pending_retry_events: list[RetryNotice] = []
@@ -82,11 +83,18 @@ def run_agent_loop(
             )
 
         for _turn in range(max_turns):
+            if memory_task is not None and memory_task.done():
+                memory_result = memory_task.result()
+                if memory_result:
+                    history.inject_messages([memory_result])
+                memory_task = None
+
             tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
             pending_retry_events.clear()
 
             # --- Call LLM ---
             try:
+
                 if stream:
                     stream_events: list = []
                     response = await _stream_call(
@@ -231,8 +239,8 @@ async def agent_loop(
     main_tools = list(ALL_TOOLS.keys())
     for reminder in build_metadata_reminders(main_tools, use_sent_tracking=True):
         history.inject_messages([reminder])
-
-    await _inject_memory_context(user_input, history)
+ 
+    memory_task = asyncio.create_task(_prepare_memory_context(user_input))
 
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
@@ -244,6 +252,7 @@ async def agent_loop(
 
     gen = run_agent_loop(
         messages=history.messages,
+        memory_task=memory_task,
         system_prompt=system,
         tool_use_context=tool_use_context,
         max_turns=config.MAX_TURNS,
@@ -461,7 +470,7 @@ async def _read_memory_files(headers: list) -> list[str]:
     return await asyncio.to_thread(_read_sync)
 
 
-async def _inject_memory_context(user_input: str, history: MessageHistory) -> None:
+async def _prepare_memory_context(user_input: str) -> dict:
     """Build and inject the <memory-context> user message for this turn."""
     mem_dir = get_memory_dir()
 
@@ -472,7 +481,7 @@ async def _inject_memory_context(user_input: str, history: MessageHistory) -> No
 
     # Nothing to inject
     if not index_content and not recalled_texts:
-        return
+        return {}
 
     # Build combined <memory-context> body
     parts: list[str] = ["<memory-context>"]
@@ -489,7 +498,5 @@ async def _inject_memory_context(user_input: str, history: MessageHistory) -> No
 
     parts.append("</memory-context>")
 
-    history.inject_messages([{
-        "role": "user",
-        "content": "\n".join(parts),
-    }])
+    return ({"role": "user",
+        "content": "\n".join(parts)})

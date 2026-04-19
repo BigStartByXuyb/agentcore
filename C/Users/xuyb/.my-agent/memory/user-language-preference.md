@@ -4,4 +4,4 @@ description: User communicates in Chinese (Simplified)
 type: user
 ---
 
-User writes in Chinese (Simplified). Responses should be in Chinese unless the user switches to another language.
+User prefers to communicate in Simplified Chinese. Respond in Chinese by default.

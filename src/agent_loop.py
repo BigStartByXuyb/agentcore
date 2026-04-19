@@ -24,17 +24,17 @@ from typing import AsyncIterator
 import anthropic.types
 
 from src import config
-from src.types import AgentState, AsyncGenWithResult, MessageHistory, ToolUseContext
+from src.types import AgentState, AsyncGenWithResult, MessageHistory, ToolUseContext,ToolCallGroup
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import strip_thinking_blocks, filter_orphaned_thinking_messages
 from src.messages import build_metadata_reminders
-from src.tool_runner import run_tool_use
+from src.tool_runner import merge_tool_call,execute_tool_groups
 from src.tools import ALL_TOOLS
 from src.api import query_model, create_stream_with_retry
 from src.errors import create_assistant_error_message
 from src.events import (
-    AgentEvent, TextDelta, TextBlock, ThinkingBlock, ToolStart, ToolEnd,
+    AgentEvent, TextDelta, TextBlock, ThinkingBlock,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
 )
 from src.display import consume_events, default_handler
@@ -152,18 +152,23 @@ def run_agent_loop(
             thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             _state.total_thinking_tokens += thinking_tokens
 
-            # Yield thinking blocks
+            # --- Step 1: yield thinking/text, collect tool_use into groups ---
+            tool_groups: list[ToolCallGroup] = []
             for block in response.content:
                 if getattr(block, "type", None) == "thinking":
                     text = getattr(block, "thinking", "") or ""
                     if text:
                         yield ThinkingBlock(label=label, thinking=text)
+                elif block.type == "text" and not stream:
+                    yield TextBlock(label=label, text=block.text)
+                elif block.type == "tool_use":
+                    merge_tool_call(id=block.id, tool_name=block.name,
+                                   tool_input=block.input, groups=tool_groups)
 
             assistant_content = _serialize_content(response.content)
             history.add_assistant(assistant_content)
 
-            # --- end_turn: done ---
-            if response.stop_reason == "end_turn":
+            if not tool_groups:
                 yield TokenUsage(
                     label=label,
                     input_tokens=_state.total_input_tokens,
@@ -173,44 +178,34 @@ def run_agent_loop(
                 run.set_result(extract_text(response.content))
                 return
 
-            # --- tool_use: execute and loop ---
-            if response.stop_reason == "tool_use":
-                tool_result_blocks: list[dict] = []
-                all_new_messages: list[dict] = []
-                pending_context_modifier = None
+            # --- Batch execute tools + collect results ---
+            group_run = execute_tool_groups(label, tool_groups, tool_use_context)
+            async for ev in group_run.events():
+                yield ev
 
-                for block in response.content:
-                    if block.type == "tool_use":
-                        yield ToolStart(label=label, tool_name=block.name, tool_input=block.input)
-                        tool_gen = run_tool_use(block.name, block.input, block.id, tool_use_context)
-                        async for ev in tool_gen.events():
-                            yield ev
-                        result, llm_text, is_error = tool_gen.result
-                        yield ToolEnd(label=label, tool_name=block.name, is_error=is_error,
-                                      result_summary=llm_text[:120] if llm_text else "")
-                        tool_result_blocks.append(
-                            build_tool_result_content(block.id, llm_text, is_error=is_error)
-                        )
-                        all_new_messages.extend(result.new_messages)
-                        if result.context_modifier is not None:
-                            pending_context_modifier = result.context_modifier
-                    elif block.type == "text" and not stream:
-                        yield TextBlock(label=label, text=block.text)
+            tool_result_blocks: list[dict] = []
+            all_new_messages: list[dict] = []
+            pending_context_modifier = None
 
-                _recover_orphan_tool_results(assistant_content, tool_result_blocks)
-                history.add_tool_results(tool_result_blocks)
+            for result, tool_id, llm_text, is_error in group_run.result:
+                tool_result_blocks.append(
+                    build_tool_result_content(tool_id, llm_text, is_error=is_error)
+                )
+                all_new_messages.extend(result.new_messages)
+                if result.context_modifier is not None:
+                    pending_context_modifier = result.context_modifier
 
-                if all_new_messages:
-                    history.add_assistant_placeholder()
-                    history.inject_messages(all_new_messages)
+            _recover_orphan_tool_results(assistant_content, tool_result_blocks)
+            history.add_tool_results(tool_result_blocks)
 
-                if pending_context_modifier is not None:
-                    tool_use_context = pending_context_modifier(tool_use_context)
+            if all_new_messages:
+                history.add_assistant_placeholder()
+                history.inject_messages(all_new_messages)
 
-                continue
+            if pending_context_modifier is not None:
+                tool_use_context = pending_context_modifier(tool_use_context)
 
-            run.set_result(f"[Unexpected stop_reason: {response.stop_reason}]")
-            return
+            continue
 
         run.set_result(f"[Agent loop '{label}' reached max turns ({max_turns})]")
 

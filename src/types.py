@@ -368,6 +368,7 @@ def _join_at_seam(a: list[dict], b: list[dict]) -> list[dict]:
 @dataclass
 class ToolCall:
     """Represents a single tool call with its input and metadata."""
+    id:str
     name: str
     input: dict
 

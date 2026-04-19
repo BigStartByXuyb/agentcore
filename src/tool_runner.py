@@ -25,26 +25,29 @@ from typing import AsyncIterator
 from src.types import AsyncGenWithResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import ALL_TOOLS
 from src.events import AgentEvent
+from src.events import ToolStart, ToolEnd
 
 logger = logging.getLogger(__name__)
 
-ToolUseReturn = tuple[ToolResult, str, bool]
+ToolUseReturn = tuple[ToolResult, str, str, bool]
 
-def merge_tool_call(tool_name: str, tool_input: dict, groups: list[ToolCallGroup]) -> None:
+def merge_tool_call(id:str, tool_name: str, tool_input: dict, groups: list[ToolCallGroup]) -> None:
     """Group consecutive tool calls by read-only/read-write type."""
     tool = ALL_TOOLS[tool_name]
     call_type = "read-only" if tool.is_read_only(tool_input) else "read-write"
 
     if groups and groups[-1].type == call_type:
-        groups[-1].tool_call.append(ToolCall(name=tool_name, input=tool_input))
+        groups[-1].tool_call.append(ToolCall(id=id, name=tool_name, input=tool_input))
     else:
-        groups.append(ToolCallGroup(tool_call=[ToolCall(name=tool_name, input=tool_input)], type=call_type))
+        groups.append(ToolCallGroup(tool_call=[ToolCall(id=id, name=tool_name, input=tool_input)], type=call_type))
 
 
 
 
 
 def run_tool_use(
+    label:str,
+    id:str,
     tool_name: str,
     tool_input: dict,
     context: ToolUseContext,
@@ -73,6 +76,7 @@ def run_tool_use(
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
         try:
+            yield ToolStart(label=label,tool_name=tool_name, tool_input=tool_input)
             ret = _tool.executor(tool_input, context)
 
             if isinstance(ret, AsyncGenWithResult):
@@ -83,10 +87,12 @@ def run_tool_use(
                 result = await ret
             else:
                 result = ret
+
         except Exception as e:
             error_text = f"Tool '{tool_name}' executor failed: {type(e).__name__}: {e}"
             logger.error(error_text, exc_info=True)
-            run.set_result((ToolResult(data=None), error_text, True))
+            run.set_result((ToolResult(data=None), id, error_text, True))
+            yield ToolEnd(label=label,is_error=True, tool_name=tool_name, result_summary=error_text)
             return
 
         try:
@@ -94,15 +100,17 @@ def run_tool_use(
         except Exception as e:
             error_text = f"Tool '{tool_name}' map_result failed: {type(e).__name__}: {e}"
             logger.error(error_text, exc_info=True)
-            run.set_result((ToolResult(data=None), error_text, True))
+            run.set_result((ToolResult(data=None), id, error_text, True))
+            yield ToolEnd(label=label,is_error=True, tool_name=tool_name, result_summary=error_text)
             return
-
-        run.set_result((result, llm_text, False))
+        yield ToolEnd(label=label,is_error=False, tool_name=tool_name, result_summary=llm_text)
+        run.set_result((result, id, llm_text, False))
 
     return AsyncGenWithResult(_impl)
 
 
 def execute_tool_groups(
+    label:str,
     groups: list[ToolCallGroup],
     context: ToolUseContext,
 ) -> AsyncGenWithResult[AgentEvent, list[ToolUseReturn]]:
@@ -118,7 +126,7 @@ def execute_tool_groups(
         for group in groups:
             if group.type == "read-only" and len(group.tool_call) > 1:
                 async def _drain(call: ToolCall) -> tuple[ToolUseReturn, list[AgentEvent]]:
-                    r = run_tool_use(call.name, call.input, context)
+                    r = run_tool_use(label, call.id, call.name, call.input, context)
                     events: list[AgentEvent] = []
                     async for ev in r.events():
                         events.append(ev)
@@ -133,7 +141,7 @@ def execute_tool_groups(
                     all_results.append(result)
             else:
                 for call in group.tool_call:
-                    r = run_tool_use(call.name, call.input, context)
+                    r = run_tool_use(label, call.id, call.name, call.input, context)
                     async for ev in r.events():
                         yield ev
                     all_results.append(r.result)

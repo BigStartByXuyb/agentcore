@@ -10,37 +10,44 @@ from src.tools import ALL_TOOLS
 # Metadata reminders (skill / agent listings)
 # ---------------------------------------------------------------------------
 
-def build_metadata_reminders(
+def build_skill_reminder(
     tools: list[str],
     *,
     use_sent_tracking: bool = True,
     skill_filter: list[str] | None = None,
     exclude_fork_skills: bool = False,
-) -> list[Attachment]:
-    """Build <system-reminder> user messages announcing available skills/agents.
+) -> Attachment | None:
+    """Build skill listing attachment. Returns None if skill tool not available."""
+    if "skill" not in {t.lower() for t in tools}:
+        return None
+    return _build_skill_reminder_msg(
+        use_sent_tracking=use_sent_tracking,
+        skill_filter=skill_filter,
+        exclude_fork_skills=exclude_fork_skills,
+    )
 
-    Returns a list of 0-2 Message objects ready to be injected into history.
-    """
-    tools_lower = {t.lower() for t in tools}
-    reminders: list[Attachment] = []
 
-    # --- Skill listing ---
-    if "skill" in tools_lower:
-        msg = _build_skill_reminder_msg(
-            use_sent_tracking=use_sent_tracking,
-            skill_filter=skill_filter,
-            exclude_fork_skills=exclude_fork_skills,
-        )
-        if msg is not None:
-            reminders.append(msg)
+def build_agent_reminder(
+    tools: list[str],
+    *,
+    use_sent_tracking: bool = True,
+) -> Attachment | None:
+    """Build agent listing attachment. Returns None if agent tool not available."""
+    if "agent" not in {t.lower() for t in tools}:
+        return None
+    return _build_agent_reminder_msg(use_sent_tracking=use_sent_tracking)
 
-    # --- Agent listing ---
-    if "agent" in tools_lower:
-        msg = _build_agent_reminder_msg(use_sent_tracking=use_sent_tracking)
-        if msg is not None:
-            reminders.append(msg)
 
-    return reminders
+def build_memory_index_reminder() -> Attachment | None:
+    """Build memory index (MEMORY.md) attachment — synchronous, always injected."""
+    from src.memory.prompt import build_memory_user_message
+    content = build_memory_user_message()
+    if not content:
+        return None
+    return Attachment(
+        type="memory_index",
+        content=f"<memory-index>\n{content}\n</memory-index>",
+    )
 
 
 def _build_skill_reminder_msg(

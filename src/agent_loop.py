@@ -31,7 +31,7 @@ from src.types import (
 )
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
-from src.messages import build_metadata_reminders
+from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
 from src.tool_runner import merge_tool_call,execute_tool_groups
 from src.tools import ALL_TOOLS
 from src.api import query_model, create_stream_with_retry
@@ -43,7 +43,6 @@ from src.events import (
 from src.display import consume_events, default_handler
 from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
-from src.memory.prompt import build_memory_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -240,9 +239,21 @@ async def agent_loop(
     user_msg = history.add_user(user_input)
 
     main_tools = list(ALL_TOOLS.keys())
-    reminders = build_metadata_reminders(main_tools, use_sent_tracking=True)
-    if reminders:
-        user_msg.attach(reminders)
+
+    # --- Independent reminder channels (each can be reloaded separately) ---
+    skill_rem = build_skill_reminder(main_tools, use_sent_tracking=True)
+    agent_rem = build_agent_reminder(main_tools, use_sent_tracking=True)
+    memory_idx = build_memory_index_reminder()
+
+    attachments: list = []
+    if skill_rem:
+        attachments.append(skill_rem)
+    if agent_rem:
+        attachments.append(agent_rem)
+    if memory_idx:
+        attachments.append(memory_idx)
+    if attachments:
+        user_msg.attach(attachments)
 
     history_copy = copy.copy(history)
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
@@ -451,30 +462,22 @@ async def _read_memory_files(headers: list) -> list[str]:
 
 
 async def _prepare_memory_context(user_input: str, history: MessageHistory) -> Attachment|None:
-    """Attach memory context to the user message (runs async, non-blocking)."""
-    mem_dir = get_memory_dir()
+    """Select and read relevant memories (runs async, non-blocking).
 
-    index_content = build_memory_user_message(mem_dir)
+    Only handles recall — the MEMORY.md index is injected synchronously
+    by build_memory_index_reminder() in agent_loop().
+    """
+    mem_dir = get_memory_dir()
 
     relevant_memories = await find_relevant_memories(user_input, mem_dir, history)
     recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
 
-    if not index_content and not recalled_texts:
+    if not recalled_texts:
         return None
 
-    parts: list[str] = ["<memory-context>"]
+    parts: list[str] = ["<memory-recalled>"]
+    parts.append("\n\n---\n\n".join(recalled_texts))
+    parts.append("</memory-recalled>")
 
-    if index_content:
-        parts.append("<memory-index>")
-        parts.append(index_content)
-        parts.append("</memory-index>")
-
-    if recalled_texts:
-        parts.append("<memory-recalled>")
-        parts.append("\n\n---\n\n".join(recalled_texts))
-        parts.append("</memory-recalled>")
-
-    parts.append("</memory-context>")
-
-    memory_files = {"files": [h.file_path for h in relevant_memories]} if relevant_memories else {}
+    memory_files = {"files": [h.file_path for h in relevant_memories]}
     return Attachment(type="relevant_memories", content="\n".join(parts), metadata=memory_files)

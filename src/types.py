@@ -70,7 +70,7 @@ ContentBlock = TextContent | ToolUseContent | ToolResultContent | ThinkingConten
 # Attachment — metadata attached to a Message
 # ---------------------------------------------------------------------------
 
-AttachmentType = Literal["relevant_memories", "system_reminder"]
+AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index"]
 
 
 @dataclass

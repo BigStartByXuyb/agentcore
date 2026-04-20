@@ -110,9 +110,8 @@ type: {{user|feedback|project|reference}}
 
 Each turn, the following tags may appear in a user message:
 
-- `<memory-context>` — wrapper for all dynamic memory data
-  - `<memory-index>` — current MEMORY.md index content (up to {_MAX_ENTRYPOINT_LINES} lines)
-  - `<memory-recalled>` — full content of memory files selected as relevant to the current query
+- `<memory-index>` — current MEMORY.md index content (always present, up to {_MAX_ENTRYPOINT_LINES} lines)
+- `<memory-recalled>` — full content of memory files selected as relevant to the current query (async, may arrive after first LLM call)
 
 These tags are system-injected, not user-written. Use the index to know what memories exist;
 use recalled content as context for your response.

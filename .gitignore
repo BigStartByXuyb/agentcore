@@ -50,3 +50,10 @@ EXPERIMENTS.md
 
 # ---- Build / Config (not needed in repo yet) ----
 pyproject.toml
+
+.gitgnore
+C*
+D*
+.mcp.json
+CLAUDE.md
+README.md

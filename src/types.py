@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Literal, TypeVar, Union
 
@@ -29,125 +30,244 @@ class MemoryHeader:
 
 
 # ---------------------------------------------------------------------------
+# Attachment — metadata attached to a Message
+# ---------------------------------------------------------------------------
+
+AttachmentType = Literal["relevant_memories", "system_reminder"]
+
+
+@dataclass
+class Attachment:
+    """Data attached to a Message, expanded into content before API calls.
+
+    Corresponds to Claude Code's Attachment system in attachments.ts.
+    Attachments are NOT sent to the API directly — normalized_for_api()
+    expands them into the message's content field.
+
+    Attributes:
+        type:     Category of attachment (for filtering/querying).
+        content:  Text to append to the message content during expansion.
+        metadata: Structured data for programmatic access (e.g. memory
+                  file paths for dedup tracking). Not sent to API.
+    """
+
+    type: AttachmentType
+    content: str
+    metadata: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Message — rich wrapper around the raw API message dict
+# ---------------------------------------------------------------------------
+
+MessageType = Literal["human", "assistant", "tool_result", "meta"]
+
+
+@dataclass
+class Message:
+    """A single conversation message with metadata and attachments.
+
+    Corresponds to Claude Code's internal Message type which stores
+    uuid, timestamp, costUSD, attachments etc. alongside the raw
+    role/content that the API expects.
+
+    The msg_type field distinguishes messages that share the same API
+    role ("user") but have different semantic meanings:
+      - "human":       actual user input
+      - "tool_result": tool execution results (API role is "user")
+      - "meta":        system-injected content (skill listings, etc.)
+      - "assistant":   LLM responses
+
+    Supports dict-style access (msg["role"], msg.get("content")) for
+    backward compatibility with code that expects raw dicts.
+    """
+
+    role: str                       # "user" | "assistant"
+    content: str | list[dict]
+    msg_type: MessageType = "human"
+    attachments: list[Attachment] = field(default_factory=list)
+    timestamp: float = field(default_factory=time.time)
+
+    # -- dict-compatible access (backward compat) ---------------------------
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    # -- serialization for persistence --------------------------------------
+
+    def to_serializable(self) -> dict:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "msg_type": self.msg_type,
+            "attachments": [
+                {"type": a.type, "content": a.content, "metadata": a.metadata}
+                for a in self.attachments
+            ],
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_serializable(cls, data: dict) -> Message:
+        attachments = [
+            Attachment(type=a["type"], content=a["content"], metadata=a.get("metadata", {}))
+            for a in data.get("attachments", [])
+        ]
+        return cls(
+            role=data["role"],
+            content=data["content"],
+            msg_type=data.get("msg_type", "human"),
+            attachments=attachments,
+            timestamp=data.get("timestamp", 0),
+        )
+
+
+# ---------------------------------------------------------------------------
 # MessageHistory — conversation state manager
 # ---------------------------------------------------------------------------
 
 class MessageHistory:
     """Manages the persistent conversation message list.
 
-    Wraps the raw list[dict] that the Anthropic API expects, providing
-    typed helper methods for common operations.  The internal list is
-    mutated in-place so callers that hold a reference to `self.messages`
-    (e.g. ToolUseContext) automatically see updates.
+    Internally stores a list[Message] with rich metadata and attachments.
+    normalized_for_api() converts to the raw list[dict] format that the
+    Anthropic API expects, expanding attachments into message content and
+    merging consecutive same-role messages.
 
-    Corresponds to Claude Code's internal Message[] array.  Claude Code
-    adds rich per-message metadata (uuid, timestamp, isMeta, isVirtual …)
-    and strips it via normalizeMessagesForAPI() before sending.  We keep
-    the raw API format internally (no need to normalise) but centralise
-    all mutations here so a richer Message type can be added later without
-    touching call-sites.
-
-    Future extension points (left as no-ops for now):
-      - compact / summarise old turns
-      - clear / reset
-      - search by tool name or content
-      - token budget tracking
+    Corresponds to Claude Code's internal Message[] + normalizeMessagesForAPI().
     """
 
     def __init__(self) -> None:
-        self._messages: list[dict] = []
+        self._messages: list[Message] = []
+        self.surfaced_memories: set[str] = set()
 
     # -- read access --------------------------------------------------------
 
     @property
-    def messages(self) -> list[dict]:
-        """Raw list for the API and ToolUseContext — read-only alias.
-
-        Callers must NOT append directly; use the add_* helpers.
-        Returning the live list (not a copy) so ToolUseContext.messages
-        stays in sync without re-assignment.
-        """
+    def messages(self) -> list[Message]:
         return self._messages
 
     def __len__(self) -> int:
         return len(self._messages)
 
+    def last_user_message(self) -> Message | None:
+        """Find the most recent actual user input (not tool_result or meta)."""
+        for msg in reversed(self._messages):
+            if msg.role == "user" and msg.msg_type == "human":
+                return msg
+        return None
+
     # -- write helpers ------------------------------------------------------
 
-    def add_user(self, content: str | list[dict]) -> None:
-        """Append a user message (plain text or content blocks)."""
-        self._messages.append({"role": "user", "content": content})
+    def add_user(self, content: str | list[dict], *, msg_type: MessageType = "human") -> Message:
+        """Append a user message. Returns the Message so caller can add attachments."""
+        msg = Message(role="user", content=content, msg_type=msg_type)
+        self._messages.append(msg)
+        return msg
 
-    def add_assistant(self, content: list[dict]) -> None:
-        """Append an assistant message (always content-block array)."""
-        self._messages.append({"role": "assistant", "content": content})
+    def add_assistant(self, content: list[dict]) -> Message:
+        msg = Message(role="assistant", content=content, msg_type="assistant")
+        self._messages.append(msg)
+        return msg
 
-    def add_tool_results(self, tool_result_blocks: list[dict]) -> None:
-        """Append a user message containing tool_result content blocks.
+    def add_tool_results(self, tool_result_blocks: list[dict]) -> Message:
+        msg = Message(role="user", content=tool_result_blocks, msg_type="tool_result")
+        self._messages.append(msg)
+        return msg
 
-        Per the API spec, tool results are sent as a user message whose
-        content is an array of {type: "tool_result", …} blocks.
-        """
-        self._messages.append({"role": "user", "content": tool_result_blocks})
+    def add_assistant_placeholder(self, text: str = "I've loaded the requested content.") -> Message:
+        msg = Message(
+            role="assistant",
+            content=[{"type": "text", "text": text}],
+            msg_type="assistant",
+        )
+        self._messages.append(msg)
+        return msg
 
-    def add_assistant_placeholder(self, text: str = "I've loaded the requested content.") -> None:
-        """Insert a minimal assistant message to maintain user/assistant alternation.
+    def inject_messages(self, new_messages: list[Message]) -> None:
+        """Bulk-append Message objects (from ToolResult.new_messages, reminders, etc.)."""
+        self._messages.extend(new_messages)
 
-        Needed when injecting Skill new_messages (which are user messages)
-        right after a user tool_result message — the API requires strict
-        alternation.
-        """
-        self._messages.append({
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        })
-
-    def inject_messages(self, new_messages: list[dict]) -> None:
-        """Bulk-append messages from ToolResult.new_messages (Skill inline mode)."""
-        for msg in new_messages:
-            self._messages.append(msg)
-
-    # -- normalization --------------------------------------------------------
+    def attach(self, msg: Message, attachments: list[Attachment]) -> None:
+        msg.attachments.extend(attachments)
+      
 
     def normalized_for_api(self) -> list[dict]:
         """Return a message list safe for the Anthropic API.
 
-        Merges consecutive same-role messages by concatenating their
-        content-block arrays.  This mirrors Claude Code's
-        normalizeMessagesForAPI() → mergeUserMessages() which folds
-        adjacent user messages into a single turn (content blocks stay
-        separate, so LLM still sees clear boundaries between e.g. two
-        Skill payloads).
+        Two-step process:
+          1. Convert each Message to a plain dict, expanding attachments
+             into the content field.
+          2. Merge consecutive same-role messages (API requires alternation).
 
-        The internal _messages list is NOT mutated — callers that need
-        the raw history for bookkeeping still see the un-merged version.
-
-        Content handling:
-          - list + list → concatenated (text-text seam gets '\\n')
-          - str + str   → joined with '\\n'
-          - str + list / list + str → str normalised to [{type:text}]
+        The internal _messages list is NOT mutated.
         """
         if not self._messages:
             return []
 
-        result: list[dict] = [self._messages[0]]
-        for msg in self._messages[1:]:
+        # Step 1: expand attachments
+        raw: list[dict] = []
+        for msg in self._messages:
+            content = _expand_with_attachments(msg) if msg.attachments else msg.content
+            raw.append({"role": msg.role, "content": content})
+
+        # Step 2: merge consecutive same-role
+        result: list[dict] = [raw[0]]
+        for d in raw[1:]:
             prev = result[-1]
-            if msg["role"] == prev["role"]:
-                # Merge content blocks
+            if d["role"] == prev["role"]:
                 prev_content = _normalize_content(prev["content"])
-                cur_content = _normalize_content(msg["content"])
+                cur_content = _normalize_content(d["content"])
                 merged = _join_at_seam(prev_content, cur_content)
                 result[-1] = {**prev, "content": merged}
             else:
-                result.append(msg)
+                result.append(d)
         return result
 
-    # -- future extension stubs ---------------------------------------------
+    # -- memory dedup -------------------------------------------------------
+
+    def collect_surfaced_memories(self) -> set[str]:
+        """Rebuild surfaced_memories from message attachments.
+
+        Used after loading a persisted history to reconstruct the set.
+        """
+        paths: set[str] = set()
+        for msg in self._messages:
+            for att in msg.attachments:
+                if att.type == "relevant_memories":
+                    paths.update(att.metadata.get("files", []))
+        return paths
+
+    # -- persistence --------------------------------------------------------
+
+    def to_serializable(self) -> dict:
+        return {
+            "messages": [m.to_serializable() for m in self._messages],
+            "surfaced_memories": list(self.surfaced_memories),
+        }
+
+    @classmethod
+    def from_serializable(cls, data: dict) -> MessageHistory:
+        h = cls()
+        h._messages = [Message.from_serializable(m) for m in data.get("messages", [])]
+        h.surfaced_memories = set(data.get("surfaced_memories", []))
+        return h
+
+    # -- lifecycle ----------------------------------------------------------
 
     def clear(self) -> None:
         """Reset conversation history (e.g. user /clear command)."""
         self._messages.clear()
+        self.surfaced_memories.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +278,7 @@ class MessageHistory:
 class ToolUseContext:
     """Execution environment passed to tool executors."""
 
-    messages: list[dict]
+    messages: list[Message]
     tools: list[str]
     depth: int = 0
     abort_signal: bool = False
@@ -175,7 +295,7 @@ class ToolResult:
     """
 
     data: Any
-    new_messages: list[dict] = field(default_factory=list)
+    new_messages: list["Message"] = field(default_factory=list)
     context_modifier: Callable[[ToolUseContext], ToolUseContext] | None = None
 
 

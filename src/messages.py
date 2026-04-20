@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.types import Message
 from src.tools import ALL_TOOLS
 
 
@@ -15,40 +16,13 @@ def build_metadata_reminders(
     use_sent_tracking: bool = True,
     skill_filter: list[str] | None = None,
     exclude_fork_skills: bool = False,
-) -> list[dict]:
+) -> list[Message]:
     """Build <system-reminder> user messages announcing available skills/agents.
 
-    Called by both the main REPL and every sub-agent launch point so the
-    sub-agent LLM knows which skills/agents it can invoke.
-
-    Which reminders are produced depends on which tools are present:
-      - "Skill" in tools  → skill listing
-      - "agent" in tools  → agent listing
-
-    Parameters:
-        tools:
-            The sub-agent's / caller's tool name list (case-insensitive match).
-        use_sent_tracking:
-            True  — main agent: dedupe via global _sent_skill_names /
-                    _sent_agent_names trackers; only new entries returned.
-            False — sub-agent: always produce the full listing. Does NOT
-                    mutate the global trackers, so sub-agent launches never
-                    pollute the main agent's dedupe state.
-        skill_filter:
-            If not None, restrict the skill listing to these skill names
-            (mirrors Claude Code's per-agent precise skill mode). Only
-            honored when use_sent_tracking=False.
-        exclude_fork_skills:
-            If True, omit fork-mode skills from the listing. Used by
-            sub-agents which should run inline skills only. Only honored
-            when use_sent_tracking=False.
-
-    Returns:
-        A list of 0-2 user messages ready to be appended to the sub-agent's
-        initial_messages (or injected into the main history).
+    Returns a list of 0-2 Message objects ready to be injected into history.
     """
     tools_lower = {t.lower() for t in tools}
-    reminders: list[dict] = []
+    reminders: list[Message] = []
 
     # --- Skill listing ---
     if "skill" in tools_lower:
@@ -74,16 +48,12 @@ def _build_skill_reminder_msg(
     use_sent_tracking: bool,
     skill_filter: list[str] | None,
     exclude_fork_skills: bool,
-) -> dict | None:
+) -> Message | None:
     """Build the skill reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
-        # Main agent — delegate to build_skill_reminder() which dedupes
-        # via the global _sent_skill_names tracker.
         from src.skills import build_skill_reminder
         return build_skill_reminder()
 
-    # Sub-agent — call format_skill_listing directly. No tracker mutation
-    # (sub-agent has independent context; must not affect main dedupe state).
     from src.skills import get_skills, format_skill_listing
     all_skills = get_skills()
     if not all_skills:
@@ -95,13 +65,14 @@ def _build_skill_reminder_msg(
     )
     if not listing:
         return None
-    return {
-        "role": "user",
-        "content": f"<system-reminder>\n{listing}\n</system-reminder>",
-    }
+    return Message(
+        role="user",
+        content=f"<system-reminder>\n{listing}\n</system-reminder>",
+        msg_type="meta",
+    )
 
 
-def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> dict | None:
+def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Message | None:
     """Build the agent reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
         from src.agents import build_agent_reminder
@@ -114,10 +85,11 @@ def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> dict | None:
     listing = format_agent_listing(all_agents)
     if not listing:
         return None
-    return {
-        "role": "user",
-        "content": f"<system-reminder>\n{listing}\n</system-reminder>",
-    }
+    return Message(
+        role="user",
+        content=f"<system-reminder>\n{listing}\n</system-reminder>",
+        msg_type="meta",
+    )
 
 # tools checking and schema construction for the API "tools" parameter is centralized
 def build_tool_schemas(

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.frontmatter import parse_frontmatter  # noqa: F401 — re-exported for back-compat
+from src.types import Message
 
 
 # ---------------------------------------------------------------------------
@@ -285,22 +286,10 @@ def format_skill_listing(
 _sent_skill_names: set[str] = set()
 
 
-def build_skill_reminder(force: bool = False) -> dict | None:
+def build_skill_reminder(force: bool = False) -> Message | None:
     """Build a <system-reminder> user message listing available skills.
 
-    Returns a dict {"role": "user", "content": "..."} ready to inject
-    into the message array, or None if there is nothing new to announce.
-
-    Mirrors Claude Code's getSkillListingAttachments() → normalizeAttachmentForAPI()
-    → wrapMessagesInSystemReminder() pipeline:
-      1. Collect skills not yet sent
-      2. Format into listing text
-      3. Wrap in <system-reminder> tags
-      4. Return as a user message
-
-    Parameters:
-      force: if True, re-send all skills regardless of sent tracking.
-             Useful for session reset / /clear.
+    Returns a Message ready to inject, or None if nothing new to announce.
     """
     global _sent_skill_names
 
@@ -308,7 +297,6 @@ def build_skill_reminder(force: bool = False) -> dict | None:
     if not all_skills:
         return None
 
-    # Determine which skills are new since last announcement
     if force:
         new_skills = all_skills
     else:
@@ -325,13 +313,13 @@ def build_skill_reminder(force: bool = False) -> dict | None:
     if not listing:
         return None
 
-    # Mark as sent
     _sent_skill_names.update(new_skills.keys())
 
-    return {
-        "role": "user",
-        "content": f"<system-reminder>\n{listing}\n</system-reminder>",
-    }
+    return Message(
+        role="user",
+        content=f"<system-reminder>\n{listing}\n</system-reminder>",
+        msg_type="meta",
+    )
 
 
 def reset_sent_skills() -> None:

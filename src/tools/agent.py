@@ -19,6 +19,7 @@ from src import config
 from src.types import (
     AgentState,
     AsyncGenWithResult,
+    Message,
     ToolDef,
     ToolResult,
     ToolUseContext,
@@ -166,11 +167,11 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
     sub_tool_names = _resolve_tools(agent_def)
 
     # --- Build initial messages ---
-    initial_messages: list[dict] = [
-        {"role": "user", "content": prompt}
+    initial_messages: list[Message] = [
+        Message(role="user", content=prompt, msg_type="human")
     ]
 
-    from src.messages import build_metadata_reminders  # local to avoid circular
+    from src.messages import build_metadata_reminders
 
     initial_messages.extend(build_metadata_reminders(
         sub_tool_names,

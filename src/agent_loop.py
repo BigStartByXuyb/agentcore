@@ -24,10 +24,9 @@ from typing import AsyncIterator
 import anthropic.types
 
 from src import config
-from src.types import AgentState, AsyncGenWithResult, MessageHistory, ToolUseContext,ToolCallGroup
+from src.types import AgentState, AsyncGenWithResult, Message, MessageHistory, ToolUseContext, ToolCallGroup
 from src.system_prompt import build_system_prompt
-from src.messages import build_tool_schemas, build_tool_result_content
-from src.messages import strip_thinking_blocks, filter_orphaned_thinking_messages
+from src.messages import build_tool_schemas, build_tool_result_content, _is_thinking_block
 from src.messages import build_metadata_reminders
 from src.tool_runner import merge_tool_call,execute_tool_groups
 from src.tools import ALL_TOOLS
@@ -50,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 def run_agent_loop(
     *,
-    messages: list[dict],
-    memory_task: asyncio.Task[dict] | None = None,
+    messages: list[Message],
+    memory_task: asyncio.Task[Message | None] | None = None,
     system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
@@ -84,9 +83,9 @@ def run_agent_loop(
 
         for _turn in range(max_turns):
             if memory_task is not None and memory_task.done():
-                memory_result = memory_task.result()
-                if memory_result:
-                    history.inject_messages([memory_result])
+                memory_msg = memory_task.result()
+                if memory_msg is not None:
+                    history.inject_messages([memory_msg])
                 memory_task = None
 
             tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
@@ -192,7 +191,7 @@ def run_agent_loop(
                 yield ev
 
             tool_result_blocks: list[dict] = []
-            all_new_messages: list[dict] = []
+            all_new_messages: list[Message] = []
             pending_context_modifier = None
 
             for result, tool_id, llm_text, is_error in group_run.result:
@@ -237,8 +236,9 @@ async def agent_loop(
     history.add_user(user_input)
 
     main_tools = list(ALL_TOOLS.keys())
-    for reminder in build_metadata_reminders(main_tools, use_sent_tracking=True):
-        history.inject_messages([reminder])
+    reminders = build_metadata_reminders(main_tools, use_sent_tracking=True)
+    if reminders:
+        history.inject_messages(reminders)
  
     memory_task = asyncio.create_task(_prepare_memory_context(user_input))
 
@@ -355,14 +355,14 @@ def _recover_orphan_tool_results(
         )
 
 
-def _wrap_messages(messages: list[dict]) -> MessageHistory:
+def _wrap_messages(messages: list[Message]) -> MessageHistory:
     """Create a MessageHistory wrapping an *existing* list (no copy).
 
     This lets run_agent_loop() use MessageHistory's normalized_for_api()
     and add_* helpers while operating on the caller's message list.
     """
     h = MessageHistory()
-    h._messages = messages  # share the same list object
+    h._messages = messages
     return h
 
 
@@ -433,16 +433,28 @@ def _is_thinking_400(error: Exception) -> bool:
     return "invalid signature" in msg or "thinking blocks cannot be modified" in msg
 
 
-def _clean_thinking_history(messages: list[dict]) -> None:
+def _clean_thinking_history(messages: list[Message]) -> None:
     """In-place strip thinking blocks from message history.
 
-    Applies strip_thinking_blocks + filter_orphaned_thinking_messages,
-    replacing the list contents in-place so all references (MessageHistory,
-    ToolUseContext) see the cleaned version.
+    Combines strip_thinking_blocks + filter_orphaned_thinking_messages
+    logic, operating directly on Message objects.
     """
-    cleaned = strip_thinking_blocks(messages)
-    cleaned = filter_orphaned_thinking_messages(cleaned)
-    messages[:] = cleaned
+    result: list[Message] = []
+    for msg in messages:
+        if msg.role != "assistant":
+            result.append(msg)
+            continue
+        content = msg.content
+        if not isinstance(content, list):
+            result.append(msg)
+            continue
+        filtered = [b for b in content if not _is_thinking_block(b)]
+        if not filtered:
+            continue
+        if len(filtered) < len(content):
+            msg.content = filtered
+        result.append(msg)
+    messages[:] = result
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +482,8 @@ async def _read_memory_files(headers: list) -> list[str]:
     return await asyncio.to_thread(_read_sync)
 
 
-async def _prepare_memory_context(user_input: str) -> dict:
-    """Build and inject the <memory-context> user message for this turn."""
+async def _prepare_memory_context(user_input: str) -> Message | None:
+    """Build the <memory-context> user message for this turn."""
     mem_dir = get_memory_dir()
 
     index_content = build_memory_user_message(mem_dir)
@@ -479,11 +491,9 @@ async def _prepare_memory_context(user_input: str) -> dict:
     relevant_memories = await find_relevant_memories(user_input, mem_dir)
     recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
 
-    # Nothing to inject
     if not index_content and not recalled_texts:
-        return {}
+        return None
 
-    # Build combined <memory-context> body
     parts: list[str] = ["<memory-context>"]
 
     if index_content:
@@ -498,5 +508,8 @@ async def _prepare_memory_context(user_input: str) -> dict:
 
     parts.append("</memory-context>")
 
-    return ({"role": "user",
-        "content": "\n".join(parts)})
+    return Message(
+        role="user",
+        content="\n".join(parts),
+        msg_type="meta",
+    )

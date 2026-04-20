@@ -14,7 +14,7 @@ import logging
 from typing import AsyncIterator
 
 from src import config
-from src.types import AgentState, AsyncGenWithResult, ToolResult, ToolDef, ToolUseContext
+from src.types import AgentState, AsyncGenWithResult, Message, ToolResult, ToolDef, ToolUseContext
 from src.events import AgentEvent
 from src.memory.paths import get_memory_dir, get_memory_dir_display, ensure_memory_dir
 from src.memory.scan import scan_memory_files, format_memory_manifest
@@ -103,15 +103,11 @@ Then update MEMORY.md index with a one-line pointer:
 
 
 def run_memory_extraction(
-    messages: list[dict],
+    messages: list[Message],
     memory_dir: str | None = None,
     since_index: int = 0,
 ) -> AsyncGenWithResult[AgentEvent, None]:
-    """Extract memories from conversation, yielding events silently.
-
-    Returns an AsyncGenWithResult — the caller should consume it with
-    await consume_events(gen, lambda e: None) for silent execution.
-    """
+    """Extract memories from conversation, yielding events silently."""
     if not config.MEMORY_ENABLED:
         return AsyncGenWithResult.of_value(None)
 
@@ -136,14 +132,15 @@ def run_memory_extraction(
 
     conversation_text = _summarize_conversation(messages)
 
-    extraction_messages = [{
-        "role": "user",
-        "content": (
+    extraction_messages: list[Message] = [Message(
+        role="user",
+        content=(
             "Review this conversation and extract any durable memories "
             "worth saving for future sessions.\n\n"
             f"<conversation>\n{conversation_text}\n</conversation>"
         ),
-    }]
+        msg_type="meta",
+    )]
 
     sandboxed_bash = _make_sandboxed_bash(mem_dir)
 
@@ -177,20 +174,14 @@ def run_memory_extraction(
     return AsyncGenWithResult(_impl)
 
 
-def _has_memory_writes(messages: list[dict], memory_dir: str, since_index: int = 0) -> bool:
-    """Check if any assistant message (from since_index onwards) wrote to memory.
-
-    Scans assistant messages for tool_use blocks that target memory paths.
-    since_index allows checking only messages added during the current turn,
-    avoiding false negatives when memory was written mid-turn but the final
-    assistant message is a plain text end_turn.
-    """
+def _has_memory_writes(messages: list[Message], memory_dir: str, since_index: int = 0) -> bool:
+    """Check if any assistant message (from since_index onwards) wrote to memory."""
     mem_dir_normalized = memory_dir.replace("\\", "/")
 
     for msg in messages[since_index:]:
-        if msg.get("role") != "assistant":
+        if msg.role != "assistant":
             continue
-        content = msg.get("content", [])
+        content = msg.content
         if isinstance(content, str):
             continue
         for block in content:
@@ -203,20 +194,14 @@ def _has_memory_writes(messages: list[dict], memory_dir: str, since_index: int =
     return False
 
 
-def _summarize_conversation(messages: list[dict], max_chars: int = 8000) -> str:
-    """Build a text summary of the conversation for the extraction agent.
-
-    Keeps the most recent messages, truncating older ones if the total
-    exceeds max_chars.  Newest messages are most likely to contain
-    information worth extracting as memories.
-    """
-    # Build entries from newest to oldest
+def _summarize_conversation(messages: list[Message], max_chars: int = 8000) -> str:
+    """Build a text summary of the conversation for the extraction agent."""
     entries: list[str] = []
     total = 0
 
     for msg in reversed(messages):
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
+        role = msg.role
+        content = msg.content
 
         if isinstance(content, str):
             text = content
@@ -238,13 +223,11 @@ def _summarize_conversation(messages: list[dict], max_chars: int = 8000) -> str:
         if total + len(entry) > max_chars:
             remaining = max_chars - total
             if remaining > 100:
-                # Truncate the beginning of this entry (keep the tail)
                 prefix = "...(truncated)\n"
                 entries.append(prefix + entry[-(remaining - len(prefix)):])
             break
         entries.append(entry)
         total += len(entry)
 
-    # Reverse back to chronological order
     entries.reverse()
     return "\n\n".join(entries)

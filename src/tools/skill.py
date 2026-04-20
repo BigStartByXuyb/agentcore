@@ -30,6 +30,7 @@ from src import config
 from src.types import (
     AgentState,
     AsyncGenWithResult,
+    Message,
     ToolDef,
     ToolResult,
     ToolUseContext,
@@ -143,21 +144,19 @@ def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
     if args:
         content = content.replace("$ARGUMENTS", args)
 
-    # Build the user message that injects skill content into the conversation
-    skill_message = {
-        "role": "user",
-        "content": (
+    skill_message = Message(
+        role="user",
+        content=(
             f"<skill-content name='{skill.name}'>\n"
             f"{content}\n"
             f"</skill-content>\n\n"
             "Please follow the skill instructions above."
         ),
-    }
+        msg_type="meta",
+    )
 
-    # Build context_modifier if skill restricts tools
     context_modifier = None
     if skill.allowed_tools:
-        # Snapshot the list — the closure must not see later mutations
         allowed = list(skill.allowed_tools)
 
         def _modifier(ctx: ToolUseContext) -> ToolUseContext:
@@ -195,23 +194,23 @@ def _execute_fork(
     Mirrors executeForkedSkill() in SkillTool.ts + prepareForkedCommandContext()
     in forkedAgent.ts.
     """
-    # --- Build skill content (cheap, do it outside the async impl) ---
     content = build_skill_content(skill)
     args = inputs.get("args", "")
     if args:
         content = content.replace("$ARGUMENTS", args)
 
-    initial_messages: list[dict] = [
-        {
-            "role": "user",
-            "content": (
+    initial_messages: list[Message] = [
+        Message(
+            role="user",
+            content=(
                 f"<skill-content name='{skill.name}'>\n"
                 f"{content}\n"
                 f"</skill-content>\n\n"
                 "Execute the skill instructions above. "
                 "When finished, provide your final result as plain text."
             ),
-        }
+            msg_type="meta",
+        )
     ]
 
     sub_system_prompt = (
@@ -221,14 +220,14 @@ def _execute_fork(
         "When finished, provide a clear, concise result.\n"
     )
 
-    from src.tools import ALL_TOOLS  # local import to avoid circular
+    from src.tools import ALL_TOOLS
 
     if skill.allowed_tools:
         sub_tool_names = list(skill.allowed_tools)
     else:
         sub_tool_names = list(ALL_TOOLS.keys())
 
-    from src.messages import build_metadata_reminders  # local to avoid circular
+    from src.messages import build_metadata_reminders
 
     initial_messages.extend(build_metadata_reminders(
         sub_tool_names,

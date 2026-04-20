@@ -15,7 +15,7 @@ import json
 import logging
 
 from src import config
-from src.types import MemoryHeader
+from src.types import MemoryHeader, MessageHistory
 from src.api import side_query
 from src.memory.scan import scan_memory_files, format_memory_manifest
 
@@ -36,11 +36,10 @@ and description.
 Example response: {"selected_memories": ["user_role.md", "project_auth.md"]}
 """
 
-
 async def find_relevant_memories(
     query: str,
     memory_dir: str,
-    already_surfaced: set[str] | None = None,
+    history: MessageHistory,
 ) -> list[MemoryHeader]:
     """Find memory files relevant to *query* by asking a cheap model.
 
@@ -50,11 +49,16 @@ async def find_relevant_memories(
     if not config.MEMORY_ENABLED:
         return []
 
-    surfaced = already_surfaced or set()
+    headers = scan_memory_files(memory_dir)
 
     try:
-        headers = scan_memory_files(memory_dir)
-        headers = [h for h in headers if h.file_path not in surfaced]
+        already_recalled: set[str] = set()
+        for msg in history.messages:
+            for attach in msg.attachments:
+                if attach.type == "relevant_memories":
+                    already_recalled.update(attach.metadata.get("files", []))
+
+        headers = [h for h in headers if h.file_path not in already_recalled]
 
         if not headers:
             return []

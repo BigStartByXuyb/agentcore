@@ -249,7 +249,8 @@ class AnthropicAdapter:
         )
         if thinking is not None:
             params["thinking"] = thinking
-
+        for msg in params["messages"]:
+            print(f"success params :{msg}\n")
         return _AsyncStreamWithRetry(
             client=client,
             params=params,

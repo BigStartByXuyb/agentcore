@@ -83,6 +83,7 @@ class Attachment:
 
     type: AttachmentType
     content: str
+    """ Use by memery file """
     metadata: dict = field(default_factory=dict)
 
 

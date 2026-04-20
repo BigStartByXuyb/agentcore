@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 def run_agent_loop(
     *,
-    memory_task: asyncio.Task[None] | None = None,
+    memory_task: asyncio.Task[Attachment | None] | None = None,
     system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
@@ -86,9 +86,12 @@ def run_agent_loop(
 
         for _turn in range(max_turns):
             if memory_task is not None and memory_task.done():
-                memory_task.result()
+                mem = memory_task.result()
                 memory_task = None
-
+                if mem is not None:
+                    last_msg = tool_use_context.messages.last_user_message()
+                    if last_msg is not None:
+                        last_msg.attach([mem])
             tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
             pending_retry_events.clear()
 
@@ -241,7 +244,8 @@ async def agent_loop(
     if reminders:
         user_msg.attach(reminders)
 
-    memory_task = asyncio.create_task(_prepare_memory_context(user_input, user_msg))
+    history_copy = copy.copy(history)
+    memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
 
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
@@ -446,17 +450,17 @@ async def _read_memory_files(headers: list) -> list[str]:
     return await asyncio.to_thread(_read_sync)
 
 
-async def _prepare_memory_context(user_input: str, user_msg: Message) -> None:
+async def _prepare_memory_context(user_input: str, history: MessageHistory) -> Attachment|None:
     """Attach memory context to the user message (runs async, non-blocking)."""
     mem_dir = get_memory_dir()
 
     index_content = build_memory_user_message(mem_dir)
 
-    relevant_memories = await find_relevant_memories(user_input, mem_dir)
+    relevant_memories = await find_relevant_memories(user_input, mem_dir, history)
     recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
 
     if not index_content and not recalled_texts:
-        return
+        return None
 
     parts: list[str] = ["<memory-context>"]
 
@@ -472,9 +476,5 @@ async def _prepare_memory_context(user_input: str, user_msg: Message) -> None:
 
     parts.append("</memory-context>")
 
-    memory_files = [h.file_path for h in relevant_memories] if relevant_memories else []
-    user_msg.attach([Attachment(
-        type="relevant_memories",
-        content="\n".join(parts),
-        metadata={"files": memory_files},
-    )])
+    memory_files = {"files": [h.file_path for h in relevant_memories]} if relevant_memories else {}
+    return Attachment(type="relevant_memories", content="\n".join(parts), metadata=memory_files)

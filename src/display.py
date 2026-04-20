@@ -49,22 +49,22 @@ def default_handler(event: AgentEvent) -> None:
         text = event.thinking
         if text:
             display = text if len(text) <= _THINKING_DISPLAY_MAX else text[:_THINKING_DISPLAY_MAX] + "..."
-            print(f"  [{label}:thinking] {display}")
+            print(f"\n  [{label}:thinking] {display}")
 
     elif isinstance(event, ToolStart):
         summary = _summarize_input(event.tool_input)
-        print(f"  [{label}:tool] {event.tool_name}({summary})")
+        print(f"\n  [{label}:tool] {event.tool_name}({summary})")
 
     elif isinstance(event, ToolEnd):
         status = "error" if event.is_error else "ok"
         summary = event.result_summary[:80] if event.result_summary else ""
-        print(f"  [{label}:tool-end] {event.tool_name} [{status}] {summary}")
+        print(f"\n  [{label}:tool-end] {event.tool_name} [{status}] {summary}")
 
     elif isinstance(event, ErrorEvent):
-        print(f"  [{label}:error] {event.error_text[:120]}")
+        print(f"\n  [{label}:error] {event.error_text[:120]}")
 
     elif isinstance(event, Recovery):
-        print(f"  [{label}:recovery] {event.message}")
+        print(f"\n  [{label}:recovery] {event.message}")
 
     elif isinstance(event, TokenUsage):
         parts = [f"in={event.input_tokens}", f"out={event.output_tokens}"]
@@ -73,13 +73,13 @@ def default_handler(event: AgentEvent) -> None:
         print(f"\n[{label} tokens: {' '.join(parts)}]")
 
     elif isinstance(event, RetryNotice):
-        print(f"  [retry] API error, retrying in {event.delay:.1f}s ({event.attempt}/{event.max_attempts})...")
+        print(f"\n  [retry] API error, retrying in {event.delay:.1f}s ({event.attempt}/{event.max_attempts})...")
 
     elif isinstance(event, SubAgentStart):
-        print(f"  [{label}] Starting (depth={event.depth})...")
+        print(f"\n  [{label}] Starting (depth={event.depth})...")
 
     elif isinstance(event, SubAgentEnd):
-        print(f"  [{label}] Completed.")
+        print(f"\n  [{label}] Completed.")
 
 
 # ---------------------------------------------------------------------------

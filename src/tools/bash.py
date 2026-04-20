@@ -31,8 +31,14 @@ SCHEMA: dict = {
     },
 }
 
-# Detect available shell once at import time
-_HAS_BASH = shutil.which("bash") is not None
+# Detect available shell once at import time.
+# On Windows, prefer Git Bash over WSL bash (C:\Windows\System32\bash.exe)
+# to avoid accidentally operating on the WSL filesystem.
+_BASH_PATH = (
+    shutil.which("bash", path=r"C:\Program Files\Git\usr\bin")
+    or shutil.which("bash")
+)
+_HAS_BASH = _BASH_PATH is not None
 
 DEFAULT_TIMEOUT_MS = 120_000
 
@@ -43,7 +49,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     timeout_sec = timeout_ms / 1000
 
     if _HAS_BASH:
-        shell_cmd = ["bash", "-c", command]
+        shell_cmd = [_BASH_PATH, "-c", command]
     else:
         shell_cmd = ["cmd", "/c", command]
 

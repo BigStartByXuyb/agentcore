@@ -186,6 +186,7 @@ def discover_skills(skills_dirs: list[str] | None = None) -> dict[str, SkillInfo
 
     Later entries override earlier ones (project skills override global).
     """
+    home = os.path.expanduser("~")
     if skills_dirs is None:
         cwd = os.getcwd()
         skills_dirs = [
@@ -193,6 +194,9 @@ def discover_skills(skills_dirs: list[str] | None = None) -> dict[str, SkillInfo
             os.path.join(cwd, ".claude", "skills"),
         ]
 
+    if os.path.join(home, ".claude", "skills") not in skills_dirs:
+        skills_dirs.append(os.path.join(home, ".claude", "skills"))
+        
     skills: dict[str, SkillInfo] = {}
 
     for base_dir in skills_dirs:

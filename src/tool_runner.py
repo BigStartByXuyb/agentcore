@@ -42,9 +42,6 @@ def merge_tool_call(id:str, tool_name: str, tool_input: dict, groups: list[ToolC
         groups.append(ToolCallGroup(tool_call=[ToolCall(id=id, name=tool_name, input=tool_input)], type=call_type))
 
 
-
-
-
 def run_tool_use(
     label:str,
     id:str,

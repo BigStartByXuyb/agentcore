@@ -142,14 +142,14 @@ def run_agent_loop(
                         error_text = error_msg["content"][0]["text"]
                         yield ErrorEvent(label=label, error_text=error_text)
                         run.set_result(error_text)
-                        return
+                        continue
                 else:
                     error_msg = create_assistant_error_message(api_error)
                     history.add_assistant(error_msg["content"])
                     error_text = error_msg["content"][0]["text"]
                     yield ErrorEvent(label=label, error_text=error_text)
                     run.set_result(error_text)
-                    return
+                    continue
 
             for ev in pending_retry_events:
                 yield ev

@@ -14,7 +14,10 @@ import logging
 from typing import AsyncIterator
 
 from src import config
-from src.types import AgentState, AsyncGenWithResult, Message, ToolResult, ToolDef, ToolUseContext
+from src.types import (
+    AgentState, AsyncGenWithResult, Message, MessageHistory,
+    ToolResult, ToolDef, TextContent, ToolUseContent, ToolUseContext,
+)
 from src.events import AgentEvent
 from src.memory.paths import get_memory_dir, get_memory_dir_display, ensure_memory_dir
 from src.memory.scan import scan_memory_files, format_memory_manifest
@@ -142,10 +145,11 @@ def run_memory_extraction(
         msg_type="meta",
     )]
 
+    extraction_history = MessageHistory(extraction_messages)
     sandboxed_bash = _make_sandboxed_bash(mem_dir)
 
     tool_use_context = ToolUseContext(
-        messages=extraction_messages,
+        messages=extraction_history,
         tools=["bash"],
         depth=1,
         tool_overrides={"bash": sandboxed_bash},
@@ -155,7 +159,6 @@ def run_memory_extraction(
         from src.agent_loop import run_agent_loop
 
         gen = run_agent_loop(
-            messages=extraction_messages,
             system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=5,
@@ -185,10 +188,10 @@ def _has_memory_writes(messages: list[Message], memory_dir: str, since_index: in
         if isinstance(content, str):
             continue
         for block in content:
-            if block.get("type") != "tool_use":
+            if not isinstance(block, ToolUseContent):
                 continue
-            if block.get("name") == "bash":
-                cmd = block.get("input", {}).get("command", "")
+            if block.name == "bash":
+                cmd = block.input.get("command", "")
                 if mem_dir_normalized in cmd.replace("\\", "/"):
                     return True
     return False
@@ -208,13 +211,10 @@ def _summarize_conversation(messages: list[Message], max_chars: int = 8000) -> s
         elif isinstance(content, list):
             text_parts = []
             for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        text_parts.append(f"[tool_use: {block.get('name', '?')}]")
-                    elif block.get("type") == "tool_result":
-                        text_parts.append("[tool_result]")
+                if isinstance(block, TextContent):
+                    text_parts.append(block.text)
+                elif isinstance(block, ToolUseContent):
+                    text_parts.append(f"[tool_use: {block.name}]")
             text = "\n".join(text_parts)
         else:
             text = str(content)

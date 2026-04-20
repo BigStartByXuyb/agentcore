@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.frontmatter import parse_frontmatter  # noqa: F401 — re-exported for back-compat
-from src.types import Message
+from src.types import Attachment
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ def format_skill_listing(
 _sent_skill_names: set[str] = set()
 
 
-def build_skill_reminder(force: bool = False) -> Message | None:
+def build_skill_reminder(force: bool = False) -> Attachment | None:
     """Build a <system-reminder> user message listing available skills.
 
     Returns a Message ready to inject, or None if nothing new to announce.
@@ -315,10 +315,9 @@ def build_skill_reminder(force: bool = False) -> Message | None:
 
     _sent_skill_names.update(new_skills.keys())
 
-    return Message(
-        role="user",
+    return Attachment(
+        type="system_reminder",
         content=f"<system-reminder>\n{listing}\n</system-reminder>",
-        msg_type="meta",
     )
 
 

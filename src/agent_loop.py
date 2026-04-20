@@ -19,14 +19,18 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import anthropic.types
 
 from src import config
-from src.types import AgentState, AsyncGenWithResult, Message, MessageHistory, ToolUseContext, ToolCallGroup
+from src.types import (
+    AgentState, Attachment, AsyncGenWithResult, ContentBlock, Message, MessageHistory,
+    TextContent, ThinkingContent, RedactedThinkingContent, ToolResultContent, ToolUseContent,
+    ToolUseContext, ToolCallGroup,
+)
 from src.system_prompt import build_system_prompt
-from src.messages import build_tool_schemas, build_tool_result_content, _is_thinking_block
+from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import build_metadata_reminders
 from src.tool_runner import merge_tool_call,execute_tool_groups
 from src.tools import ALL_TOOLS
@@ -49,8 +53,7 @@ logger = logging.getLogger(__name__)
 
 def run_agent_loop(
     *,
-    messages: list[Message],
-    memory_task: asyncio.Task[Message | None] | None = None,
+    memory_task: asyncio.Task[None] | None = None,
     system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
@@ -69,10 +72,10 @@ def run_agent_loop(
     in toolUseContext.options.tools.
     """
     _state = state or AgentState(agent_id=label)
+    history = tool_use_context.messages
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
         nonlocal tool_use_context, memory_task
-        history = _wrap_messages(messages)
 
         pending_retry_events: list[RetryNotice] = []
 
@@ -83,9 +86,7 @@ def run_agent_loop(
 
         for _turn in range(max_turns):
             if memory_task is not None and memory_task.done():
-                memory_msg = memory_task.result()
-                if memory_msg is not None:
-                    history.inject_messages([memory_msg])
+                memory_task.result()
                 memory_task = None
 
             tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
@@ -190,7 +191,7 @@ def run_agent_loop(
             async for ev in group_run.events():
                 yield ev
 
-            tool_result_blocks: list[dict] = []
+            tool_result_blocks: list[ToolResultContent] = []
             all_new_messages: list[Message] = []
             pending_context_modifier = None
 
@@ -233,25 +234,24 @@ async def agent_loop(
     `history` is the persistent conversation state shared across turns.
     The caller (main.py REPL) owns it; we mutate via its typed helpers.
     """
-    history.add_user(user_input)
+    user_msg = history.add_user(user_input)
 
     main_tools = list(ALL_TOOLS.keys())
     reminders = build_metadata_reminders(main_tools, use_sent_tracking=True)
     if reminders:
-        history.inject_messages(reminders)
- 
-    memory_task = asyncio.create_task(_prepare_memory_context(user_input))
+        user_msg.attach(reminders)
+
+    memory_task = asyncio.create_task(_prepare_memory_context(user_input, user_msg))
 
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
-        messages=history.messages,
+        messages=history,
         tools=list(ALL_TOOLS.keys()),
     )
 
     turn_start_index = len(history)
 
     gen = run_agent_loop(
-        messages=history.messages,
         memory_task=memory_task,
         system_prompt=system,
         tool_use_context=tool_use_context,
@@ -291,7 +291,7 @@ async def _stream_call(
     system_prompt: str,
     tools: list[dict],
     thinking: dict | None,
-    on_retry: callable | None,
+    on_retry: Callable[[float, int, int], None] | None,
     label: str,
     emit: list,
 ) -> anthropic.types.Message:
@@ -321,30 +321,19 @@ async def _stream_call(
 # ---------------------------------------------------------------------------
 
 def _recover_orphan_tool_results(
-    assistant_content: list[dict],
-    tool_result_blocks: list[dict],
+    assistant_content: list[ContentBlock],
+    tool_result_blocks: list[ToolResultContent],
 ) -> None:
     """Ensure every tool_use in assistant_content has a matching tool_result.
 
-    If a tool_use block was somehow skipped (e.g. an earlier tool raised and
-    broke the loop), we append an is_error=True placeholder so the API never
-    sees a tool_use without its corresponding tool_result.
-
-    Mirrors Claude Code's yieldMissingToolResultBlocks() in query.ts:123-149.
     Mutates tool_result_blocks in place.
     """
-    # Collect tool_use ids from the assistant response
     expected_ids = {
-        block["id"]
+        block.id
         for block in assistant_content
-        if block.get("type") == "tool_use"
+        if isinstance(block, ToolUseContent)
     }
-    # Collect tool_use ids we already have results for
-    seen_ids = {
-        block["tool_use_id"]
-        for block in tool_result_blocks
-    }
-    # Fill in any missing ones
+    seen_ids = {block.tool_use_id for block in tool_result_blocks}
     for missing_id in expected_ids - seen_ids:
         tool_result_blocks.append(
             build_tool_result_content(
@@ -355,48 +344,27 @@ def _recover_orphan_tool_results(
         )
 
 
-def _wrap_messages(messages: list[Message]) -> MessageHistory:
-    """Create a MessageHistory wrapping an *existing* list (no copy).
 
-    This lets run_agent_loop() use MessageHistory's normalized_for_api()
-    and add_* helpers while operating on the caller's message list.
-    """
-    h = MessageHistory()
-    h._messages = messages
-    return h
-
-
-def _serialize_content(content_blocks: list) -> list[dict]:
-    """Convert SDK content block objects to plain dicts for re-sending."""
-    result: list[dict] = []
+def _serialize_content(content_blocks: list) -> list[ContentBlock]:
+    """Convert SDK content block objects to our ContentBlock types."""
+    result: list[ContentBlock] = []
     for block in content_blocks:
         if block.type == "text":
-            result.append({"type": "text", "text": block.text})
+            result.append(TextContent(text=block.text))
         elif block.type == "tool_use":
-            result.append({
-                "type": "tool_use",
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
+            result.append(ToolUseContent(id=block.id, name=block.name, input=block.input))
         elif block.type == "thinking":
-            # Preserve thinking blocks with their signature — the signature
-            # is bound to the API key + model and must be sent back verbatim.
-            result.append({
-                "type": "thinking",
-                "thinking": block.thinking,
-                "signature": block.signature,
-            })
+            result.append(ThinkingContent(thinking=block.thinking, signature=block.signature))
         elif block.type == "redacted_thinking":
-            result.append({"type": "redacted_thinking", "data": block.data})
+            result.append(RedactedThinkingContent(data=block.data))
     return result
 
 
 def extract_text(content_blocks: list) -> str:
-    """Pull plain text from the response content blocks."""
+    """Pull plain text from the response content blocks (SDK objects)."""
     parts: list[str] = []
     for block in content_blocks:
-        if block.type == "text":
+        if getattr(block, "type", None) == "text":
             parts.append(block.text)
     return "\n".join(parts)
 
@@ -434,11 +402,7 @@ def _is_thinking_400(error: Exception) -> bool:
 
 
 def _clean_thinking_history(messages: list[Message]) -> None:
-    """In-place strip thinking blocks from message history.
-
-    Combines strip_thinking_blocks + filter_orphaned_thinking_messages
-    logic, operating directly on Message objects.
-    """
+    """In-place strip thinking blocks from message history."""
     result: list[Message] = []
     for msg in messages:
         if msg.role != "assistant":
@@ -448,7 +412,7 @@ def _clean_thinking_history(messages: list[Message]) -> None:
         if not isinstance(content, list):
             result.append(msg)
             continue
-        filtered = [b for b in content if not _is_thinking_block(b)]
+        filtered: list[ContentBlock] = [b for b in content if not isinstance(b, (ThinkingContent, RedactedThinkingContent))]
         if not filtered:
             continue
         if len(filtered) < len(content):
@@ -482,8 +446,8 @@ async def _read_memory_files(headers: list) -> list[str]:
     return await asyncio.to_thread(_read_sync)
 
 
-async def _prepare_memory_context(user_input: str) -> Message | None:
-    """Build the <memory-context> user message for this turn."""
+async def _prepare_memory_context(user_input: str, user_msg: Message) -> None:
+    """Attach memory context to the user message (runs async, non-blocking)."""
     mem_dir = get_memory_dir()
 
     index_content = build_memory_user_message(mem_dir)
@@ -492,7 +456,7 @@ async def _prepare_memory_context(user_input: str) -> Message | None:
     recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
 
     if not index_content and not recalled_texts:
-        return None
+        return
 
     parts: list[str] = ["<memory-context>"]
 
@@ -508,8 +472,9 @@ async def _prepare_memory_context(user_input: str) -> Message | None:
 
     parts.append("</memory-context>")
 
-    return Message(
-        role="user",
+    memory_files = [h.file_path for h in relevant_memories] if relevant_memories else []
+    user_msg.attach([Attachment(
+        type="relevant_memories",
         content="\n".join(parts),
-        msg_type="meta",
-    )
+        metadata={"files": memory_files},
+    )])

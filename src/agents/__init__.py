@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.frontmatter import parse_frontmatter
-from src.types import Message
+from src.types import Attachment
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ def format_agent_listing(agents: dict[str, AgentDefinition]) -> str:
     return "\n".join(lines)
 
 
-def build_agent_reminder(force: bool = False) -> Message | None:
+def build_agent_reminder(force: bool = False) -> Attachment | None:
     """Build a <system-reminder> user message listing available agents.
 
     Returns None if there are no new agents to announce.
@@ -276,10 +276,9 @@ def build_agent_reminder(force: bool = False) -> Message | None:
         return None
 
     _sent_agent_names.update(new_agents.keys())
-    return Message(
-        role="user",
-        content=f"<system-reminder>\n{listing}\n</system-reminder>",
-        msg_type="meta",
+    return Attachment(
+        type="system_reminder",
+        content=f"<system-reminder>\n{listing}\n</system-reminder>"
     )
 
 

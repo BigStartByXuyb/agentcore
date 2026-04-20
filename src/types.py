@@ -30,6 +30,43 @@ class MemoryHeader:
 
 
 # ---------------------------------------------------------------------------
+# ContentBlock — provider-agnostic content block types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TextContent:
+    text: str
+    type: str = field(default="text", init=False)
+
+@dataclass
+class ToolUseContent:
+    id: str
+    name: str
+    input: dict
+    type: str = field(default="tool_use", init=False)
+
+@dataclass
+class ToolResultContent:
+    tool_use_id: str
+    content: str
+    is_error: bool = False
+    type: str = field(default="tool_result", init=False)
+
+@dataclass
+class ThinkingContent:
+    thinking: str
+    signature: str
+    type: str = field(default="thinking", init=False)
+
+@dataclass
+class RedactedThinkingContent:
+    data: str
+    type: str = field(default="redacted_thinking", init=False)
+
+ContentBlock = TextContent | ToolUseContent | ToolResultContent | ThinkingContent | RedactedThinkingContent
+
+
+# ---------------------------------------------------------------------------
 # Attachment — metadata attached to a Message
 # ---------------------------------------------------------------------------
 
@@ -40,15 +77,8 @@ AttachmentType = Literal["relevant_memories", "system_reminder"]
 class Attachment:
     """Data attached to a Message, expanded into content before API calls.
 
-    Corresponds to Claude Code's Attachment system in attachments.ts.
     Attachments are NOT sent to the API directly — normalized_for_api()
     expands them into the message's content field.
-
-    Attributes:
-        type:     Category of attachment (for filtering/querying).
-        content:  Text to append to the message content during expansion.
-        metadata: Structured data for programmatic access (e.g. memory
-                  file paths for dedup tracking). Not sent to API.
     """
 
     type: AttachmentType
@@ -67,47 +97,33 @@ MessageType = Literal["human", "assistant", "tool_result", "meta"]
 class Message:
     """A single conversation message with metadata and attachments.
 
-    Corresponds to Claude Code's internal Message type which stores
-    uuid, timestamp, costUSD, attachments etc. alongside the raw
-    role/content that the API expects.
-
     The msg_type field distinguishes messages that share the same API
     role ("user") but have different semantic meanings:
       - "human":       actual user input
       - "tool_result": tool execution results (API role is "user")
       - "meta":        system-injected content (skill listings, etc.)
       - "assistant":   LLM responses
-
-    Supports dict-style access (msg["role"], msg.get("content")) for
-    backward compatibility with code that expects raw dicts.
     """
 
-    role: str                       # "user" | "assistant"
-    content: str | list[dict]
+    role: str                                   # "user" | "assistant"
+    content: str | list[ContentBlock]
     msg_type: MessageType = "human"
     attachments: list[Attachment] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
-    # -- dict-compatible access (backward compat) ---------------------------
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key)
+    def attach(self, attachments: list[Attachment]) -> None:
+        self.attachments.extend(attachments)
 
     # -- serialization for persistence --------------------------------------
 
     def to_serializable(self) -> dict:
+        if isinstance(self.content, str):
+            serialized_content = self.content
+        else:
+            serialized_content = [_content_block_to_dict(b) for b in self.content]
         return {
             "role": self.role,
-            "content": self.content,
+            "content": serialized_content,
             "msg_type": self.msg_type,
             "attachments": [
                 {"type": a.type, "content": a.content, "metadata": a.metadata}
@@ -122,13 +138,59 @@ class Message:
             Attachment(type=a["type"], content=a["content"], metadata=a.get("metadata", {}))
             for a in data.get("attachments", [])
         ]
+        raw_content = data["content"]
+        if isinstance(raw_content, str):
+            content: str | list[ContentBlock] = raw_content
+        else:
+            content = [_dict_to_content_block(d) for d in raw_content]
         return cls(
             role=data["role"],
-            content=data["content"],
+            content=content,
             msg_type=data.get("msg_type", "human"),
             attachments=attachments,
             timestamp=data.get("timestamp", 0),
         )
+
+
+# ---------------------------------------------------------------------------
+# ContentBlock ↔ dict conversion helpers
+# ---------------------------------------------------------------------------
+
+def _content_block_to_dict(block: ContentBlock) -> dict:
+    """Convert a ContentBlock to a plain dict for API / serialization."""
+    if isinstance(block, TextContent):
+        return {"type": "text", "text": block.text}
+    if isinstance(block, ToolUseContent):
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    if isinstance(block, ToolResultContent):
+        d: dict = {"type": "tool_result", "tool_use_id": block.tool_use_id, "content": block.content}
+        if block.is_error:
+            d["is_error"] = True
+        return d
+    if isinstance(block, ThinkingContent):
+        return {"type": "thinking", "thinking": block.thinking, "signature": block.signature}
+    if isinstance(block, RedactedThinkingContent):
+        return {"type": "redacted_thinking", "data": block.data}
+    raise TypeError(f"Unknown content block type: {type(block)}")
+
+
+def _dict_to_content_block(d: dict) -> ContentBlock:
+    """Convert a plain dict to a ContentBlock (for deserialization)."""
+    t = d.get("type")
+    if t == "text":
+        return TextContent(text=d["text"])
+    if t == "tool_use":
+        return ToolUseContent(id=d["id"], name=d["name"], input=d["input"])
+    if t == "tool_result":
+        return ToolResultContent(
+            tool_use_id=d["tool_use_id"], content=d.get("content", ""),
+            is_error=d.get("is_error", False),
+        )
+    if t == "thinking":
+        return ThinkingContent(thinking=d["thinking"], signature=d["signature"])
+    if t == "redacted_thinking":
+        return RedactedThinkingContent(data=d["data"])
+    raise ValueError(f"Unknown content block type: {t}")
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +208,8 @@ class MessageHistory:
     Corresponds to Claude Code's internal Message[] + normalizeMessagesForAPI().
     """
 
-    def __init__(self) -> None:
-        self._messages: list[Message] = []
+    def __init__(self, messages: list[Message] | None = None) -> None:
+        self._messages: list[Message] = messages if messages is not None else []
         self.surfaced_memories: set[str] = set()
 
     # -- read access --------------------------------------------------------
@@ -168,57 +230,60 @@ class MessageHistory:
 
     # -- write helpers ------------------------------------------------------
 
-    def add_user(self, content: str | list[dict], *, msg_type: MessageType = "human") -> Message:
-        """Append a user message. Returns the Message so caller can add attachments."""
+    def add_user(self, content: str | list[ContentBlock], *, msg_type: MessageType = "human") -> Message:
         msg = Message(role="user", content=content, msg_type=msg_type)
         self._messages.append(msg)
         return msg
 
-    def add_assistant(self, content: list[dict]) -> Message:
+    def add_assistant(self, content: list[ContentBlock]) -> Message:
         msg = Message(role="assistant", content=content, msg_type="assistant")
         self._messages.append(msg)
         return msg
 
-    def add_tool_results(self, tool_result_blocks: list[dict]) -> Message:
-        msg = Message(role="user", content=tool_result_blocks, msg_type="tool_result")
+    def add_tool_results(self, blocks: list[ToolResultContent]) -> Message:
+        content: list[ContentBlock] = list(blocks)
+        msg = Message(role="user", content=content, msg_type="tool_result")
         self._messages.append(msg)
         return msg
 
     def add_assistant_placeholder(self, text: str = "I've loaded the requested content.") -> Message:
         msg = Message(
             role="assistant",
-            content=[{"type": "text", "text": text}],
+            content=[TextContent(text=text)],
             msg_type="assistant",
         )
         self._messages.append(msg)
         return msg
 
     def inject_messages(self, new_messages: list[Message]) -> None:
-        """Bulk-append Message objects (from ToolResult.new_messages, reminders, etc.)."""
         self._messages.extend(new_messages)
-
-    def attach(self, msg: Message, attachments: list[Attachment]) -> None:
-        msg.attachments.extend(attachments)
-      
 
     def normalized_for_api(self) -> list[dict]:
         """Return a message list safe for the Anthropic API.
 
-        Two-step process:
-          1. Convert each Message to a plain dict, expanding attachments
-             into the content field.
-          2. Merge consecutive same-role messages (API requires alternation).
+        Three-step process:
+          1. Convert ContentBlock objects to plain dicts.
+          2. Expand attachments into the content field.
+          3. Merge consecutive same-role messages (API requires alternation).
 
         The internal _messages list is NOT mutated.
         """
         if not self._messages:
             return []
 
-        # Step 1: expand attachments
+        # Step 1+2: convert blocks to dicts + expand attachments
         raw: list[dict] = []
         for msg in self._messages:
-            content = _expand_with_attachments(msg) if msg.attachments else msg.content
-            raw.append({"role": msg.role, "content": content})
+            if isinstance(msg.content, str):
+                api_content: str | list[dict] = msg.content
+            else:
+                api_content = [_content_block_to_dict(b) for b in msg.content]
+
+            # all attchments type are "text"
+            if msg.attachments:
+                api_content = _expand_with_attachments(api_content, msg.attachments)
+
+            raw.append({"role": msg.role, "content": api_content})
 
         # Step 2: merge consecutive same-role
         result: list[dict] = [raw[0]]
@@ -278,7 +343,7 @@ class MessageHistory:
 class ToolUseContext:
     """Execution environment passed to tool executors."""
 
-    messages: list[Message]
+    messages: MessageHistory
     tools: list[str]
     depth: int = 0
     abort_signal: bool = False
@@ -455,11 +520,22 @@ class AsyncGenWithResult(Generic[E, R]):
 # Mirrors Claude Code's joinTextAtSeam() + normalizeUserTextContent()
 # ---------------------------------------------------------------------------
 
-def _normalize_content(content: str | list[dict]) -> list[dict]:
-    """Ensure content is always a list of content blocks.
+def _expand_with_attachments(
+    content: str | list[dict],
+    attachments: list[Attachment],
+) -> list[dict]:
+    """Expand attachments into content blocks for the API.
 
-    Mirrors normalizeUserTextContent() in messages.ts.
+    Appends each attachment's text as a text block to the content.
     """
+    blocks = _normalize_content(content)
+    for att in attachments:
+        blocks.append({"type":"text", "text":att.content})
+    return blocks
+
+
+def _normalize_content(content: str | list[dict]) -> list[dict]:
+    """Ensure content is always a list of content blocks."""
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     return content

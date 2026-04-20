@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.types import Message
+from src.types import ToolResultContent, Attachment
 from src.tools import ALL_TOOLS
 
 
@@ -16,13 +16,13 @@ def build_metadata_reminders(
     use_sent_tracking: bool = True,
     skill_filter: list[str] | None = None,
     exclude_fork_skills: bool = False,
-) -> list[Message]:
+) -> list[Attachment]:
     """Build <system-reminder> user messages announcing available skills/agents.
 
     Returns a list of 0-2 Message objects ready to be injected into history.
     """
     tools_lower = {t.lower() for t in tools}
-    reminders: list[Message] = []
+    reminders: list[Attachment] = []
 
     # --- Skill listing ---
     if "skill" in tools_lower:
@@ -48,7 +48,7 @@ def _build_skill_reminder_msg(
     use_sent_tracking: bool,
     skill_filter: list[str] | None,
     exclude_fork_skills: bool,
-) -> Message | None:
+) -> Attachment | None:
     """Build the skill reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
         from src.skills import build_skill_reminder
@@ -65,14 +65,13 @@ def _build_skill_reminder_msg(
     )
     if not listing:
         return None
-    return Message(
-        role="user",
+    return Attachment(
+        type="system_reminder",
         content=f"<system-reminder>\n{listing}\n</system-reminder>",
-        msg_type="meta",
     )
 
 
-def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Message | None:
+def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Attachment | None:
     """Build the agent reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
         from src.agents import build_agent_reminder
@@ -85,10 +84,9 @@ def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Message | None:
     listing = format_agent_listing(all_agents)
     if not listing:
         return None
-    return Message(
-        role="user",
+    return Attachment(
+        type="system_reminder",
         content=f"<system-reminder>\n{listing}\n</system-reminder>",
-        msg_type="meta",
     )
 
 # tools checking and schema construction for the API "tools" parameter is centralized
@@ -128,27 +126,18 @@ def build_tool_schemas(
     return result
 
 
-def build_tool_result_content(tool_use_id: str, content: str, is_error: bool = False) -> dict:
-    """Build a single tool_result content block.
-
-    When is_error is True, wraps the content in <tool_use_error> tags and
-    sets the ``is_error`` flag so the LLM can structurally distinguish
-    success from failure.  Mirrors Claude Code's tool_result construction
-    in toolExecution.ts.
-    """
+def build_tool_result_content(tool_use_id: str, content: str, is_error: bool = False) -> ToolResultContent:
+    """Build a single tool_result content block."""
     if is_error:
-        return {
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": f"<tool_use_error>{content}</tool_use_error>",
-            "is_error": True,
-        }
-    return {
-        "type": "tool_result",
-        "tool_use_id": tool_use_id,
-        "content": content,
-         "is_error": False
-    }
+        return ToolResultContent(
+            tool_use_id=tool_use_id,
+            content=f"<tool_use_error>{content}</tool_use_error>",
+            is_error=True,
+        )
+    return ToolResultContent(
+        tool_use_id=tool_use_id,
+        content=content,
+    )
 
 
 # ---------------------------------------------------------------------------

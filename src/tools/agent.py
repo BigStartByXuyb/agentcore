@@ -20,6 +20,7 @@ from src.types import (
     AgentState,
     AsyncGenWithResult,
     Message,
+    MessageHistory,
     ToolDef,
     ToolResult,
     ToolUseContext,
@@ -166,23 +167,26 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
     # --- Build tool name list ---
     sub_tool_names = _resolve_tools(agent_def)
 
-    # --- Build initial messages ---
+    # --- Build initial messages + history ---
     initial_messages: list[Message] = [
         Message(role="user", content=prompt, msg_type="human")
     ]
 
     from src.messages import build_metadata_reminders
 
-    initial_messages.extend(build_metadata_reminders(
-        sub_tool_names,
-        use_sent_tracking=False,
-        skill_filter=agent_def.skills,
-        exclude_fork_skills=True,
-    ))
+    sub_history = MessageHistory(initial_messages)
+    msg = sub_history.last_user_message()
+    if msg is not None:
+        msg.attach(build_metadata_reminders(
+            sub_tool_names,
+            use_sent_tracking=False,
+            skill_filter=agent_def.skills,
+            exclude_fork_skills=True,
+        ))
 
     # --- Sub-agent context ---
     sub_context = ToolUseContext(
-        messages=initial_messages,
+        messages=sub_history,
         tools=sub_tool_names,
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
@@ -197,7 +201,6 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
             from src.agent_loop import run_agent_loop  # local import to avoid circular
 
             gen = run_agent_loop(
-                messages=initial_messages,
                 system_prompt=agent_def.system_prompt,
                 tool_use_context=sub_context,
                 max_turns=agent_def.max_turns,

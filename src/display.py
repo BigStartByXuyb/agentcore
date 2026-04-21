@@ -8,6 +8,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Callable
 
 from src.types import AsyncGenWithResult
@@ -24,6 +25,8 @@ from src.events import (
     RetryNotice,
     SubAgentStart,
     SubAgentEnd,
+    PermissionRequest,
+    PermissionDenied,
 )
 
 _THINKING_DISPLAY_MAX = 200
@@ -81,6 +84,9 @@ def default_handler(event: AgentEvent) -> None:
     elif isinstance(event, SubAgentEnd):
         print(f"\n  [{label}] Completed.")
 
+    elif isinstance(event, PermissionDenied):
+        print(f"\n  [{label}:denied] {event.tool_name}: {event.message}")
+
 
 # ---------------------------------------------------------------------------
 # Event consumer
@@ -90,9 +96,19 @@ async def consume_events(
     gen: AsyncGenWithResult,
     handler: Callable[[AgentEvent], None] | None = None,
 ):
-    """Drain an AsyncGenWithResult, dispatch events, return final value."""
+    """Drain an AsyncGenWithResult, dispatch events, return final value.
+
+    PermissionRequest events are handled inline: we prompt the user
+    via asyncio.to_thread(input) and fill the Future so the tool_runner
+    can resume.
+    """
     async for event in gen.events():
-        if handler is not None:
+        if isinstance(event, PermissionRequest) and event.future is not None:
+            summary = _summarize_input(event.tool_input)
+            prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
+            answer = await asyncio.to_thread(input, prompt)
+            event.future.set_result(answer.strip().lower())
+        elif handler is not None:
             handler(event)
     return gen.result
 

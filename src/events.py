@@ -10,6 +10,7 @@ The generator pattern decouples the agent loop (logic) from the terminal
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 
@@ -115,3 +116,22 @@ class SubAgentStart(AgentEvent):
 class SubAgentEnd(AgentEvent):
     """A sub-agent or fork skill has completed."""
     pass
+
+
+# ---------------------------------------------------------------------------
+# Permission events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PermissionRequest(AgentEvent):
+    """Tool needs user authorization — consumer fills the Future."""
+    tool_name: str = ""
+    tool_input: dict = field(default_factory=dict)
+    future: asyncio.Future | None = None
+
+
+@dataclass
+class PermissionDenied(AgentEvent):
+    """Tool was denied by a permission rule."""
+    tool_name: str = ""
+    message: str = ""

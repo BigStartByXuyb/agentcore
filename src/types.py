@@ -349,6 +349,7 @@ class ToolUseContext:
     depth: int = 0
     abort_signal: bool = False
     tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for ALL_TOOLS lookup
+    permissions: Any | None = None      # PermissionEngine instance (avoid circular import)
 
 
 @dataclass

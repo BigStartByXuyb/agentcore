@@ -1,0 +1,12 @@
+{
+  "allow": [
+    "read_file",
+    "grep",
+    "Skill",
+    "Agent"
+  ],
+  "deny": [
+    "bash(rm -rf *)",
+    "bash(git push --force *)"
+  ]
+}

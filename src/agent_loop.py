@@ -50,6 +50,35 @@ logger = logging.getLogger(__name__)
 # Low-level agent loop — shared by top-level REPL and sub-agents
 # ---------------------------------------------------------------------------
 
+""""
+such of imp twice write:
+def test_func()->Callable[[RESULT],AsyncIterator[int]]:
+
+    async def imp(result:RESULT)->AsyncIterator[int]:
+        yield 1
+        result.result = 1
+
+    return imp
+    
+class RESULT:
+    result:int
+
+class test:
+    def __init__(self, result:RESULT, test1:Callable[[RESULT],]):
+        self.result = result
+        self.test1 = test1
+
+    async def run(self):
+        async for i in self.test1(self.result):
+            print(i)
+
+async def run_test():
+    test1 = test_func()
+    result:RESULT = RESULT()
+    runtest = test(result=result, test1=test1)
+    await runtest.run()
+"""""
+
 def run_agent_loop(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
@@ -262,6 +291,7 @@ async def agent_loop(
     tool_use_context = ToolUseContext(
         messages=history,
         tools=list(ALL_TOOLS.keys()),
+        permissions=_get_permission_engine(),
     )
 
     turn_start_index = len(history)
@@ -481,3 +511,23 @@ async def _prepare_memory_context(user_input: str, history: MessageHistory) -> A
 
     memory_files = {"files": [h.file_path for h in relevant_memories]}
     return Attachment(type="relevant_memories", content="\n".join(parts), metadata=memory_files)
+
+
+# ---------------------------------------------------------------------------
+# Permission engine singleton
+# ---------------------------------------------------------------------------
+
+_permission_engine = None
+
+
+def _get_permission_engine():
+    """Lazy-init singleton PermissionEngine with two-layer config."""
+    global _permission_engine
+    if _permission_engine is None:
+        from src.permissions import PermissionEngine
+        import os
+        _permission_engine = PermissionEngine(
+            user_config=os.path.expanduser("~/.my-agent/permissions.json"),
+            project_config="agent-permissions.json",
+        )
+    return _permission_engine

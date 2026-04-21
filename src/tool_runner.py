@@ -25,7 +25,7 @@ from typing import AsyncIterator
 from src.types import AsyncGenWithResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import ALL_TOOLS
 from src.events import AgentEvent
-from src.events import ToolStart, ToolEnd
+from src.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,42 @@ def run_tool_use(
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
         try:
-            yield ToolStart(label=label,tool_name=tool_name, tool_input=tool_input)
+            yield ToolStart(label=label, tool_name=tool_name, tool_input=tool_input)
+
+            # --- Permission check ---
+            if context.permissions is not None:
+                content = _extract_content(tool_name, tool_input)
+                decision = context.permissions.check(tool_name, content)
+
+                if decision.behavior == "deny":
+                    msg = decision.message or "Permission denied"
+                    yield PermissionDenied(label=label, tool_name=tool_name, message=msg)
+                    run.set_result((ToolResult(data=None), id, msg, True))
+                    yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=msg)
+                    return
+
+                if decision.behavior == "ask":
+                    future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+                    yield PermissionRequest(
+                        label=label, tool_name=tool_name, tool_input=tool_input, future=future,
+                    )
+                    answer = await future
+                    if answer in ("y", "yes"):
+                        pass
+                    elif answer == "always":
+                        from src.permissions import PermissionRule
+                        context.permissions.add_session_rule(PermissionRule(
+                            tool_name=tool_name,
+                            content_pattern=content,
+                            behavior="allow",
+                            source="session",
+                        ))
+                    else:
+                        deny_msg = "User denied permission"
+                        run.set_result((ToolResult(data=None), id, deny_msg, True))
+                        yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg)
+                        return
+
             ret = _tool.executor(tool_input, context)
 
             if isinstance(ret, AsyncGenWithResult):
@@ -146,3 +181,16 @@ def execute_tool_groups(
         run.set_result(all_results)
 
     return AsyncGenWithResult(_impl)
+
+
+# ---------------------------------------------------------------------------
+# Permission helpers
+# ---------------------------------------------------------------------------
+
+def _extract_content(tool_name: str, tool_input: dict) -> str | None:
+    """Extract the permission-relevant content string from tool input."""
+    if tool_name == "bash":
+        return tool_input.get("command")
+    if tool_name in ("read_file", "write_file", "edit_file"):
+        return tool_input.get("file_path")
+    return None

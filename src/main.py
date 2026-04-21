@@ -20,7 +20,7 @@ from src import config
 from src.agent_loop import agent_loop
 from src.types import AgentState, MessageHistory
 from src.mcp_tool import register_mcp_tools
-from src.tools import ALL_TOOLS
+from src.tools import registry as tool_registry
 
 
 async def async_main() -> None:
@@ -32,7 +32,7 @@ async def async_main() -> None:
 
     history = MessageHistory()
     state = AgentState()
-    register_mcp_tools(ALL_TOOLS)
+    register_mcp_tools(tool_registry)
 
     while True:
         try:

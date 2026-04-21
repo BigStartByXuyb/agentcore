@@ -23,7 +23,7 @@ import logging
 from typing import AsyncIterator
 
 from src.types import AsyncGenWithResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
-from src.tools import ALL_TOOLS
+from src.tools import registry as tool_registry
 from src.events import AgentEvent
 from src.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
 
@@ -33,7 +33,9 @@ ToolUseReturn = tuple[ToolResult, str, str, bool]
 
 def merge_tool_call(id:str, tool_name: str, tool_input: dict, groups: list[ToolCallGroup]) -> None:
     """Group consecutive tool calls by read-only/read-write type."""
-    tool = ALL_TOOLS[tool_name]
+    tool = tool_registry.get(tool_name)
+    if tool is None:
+        return
     call_type = "read-only" if tool.is_read_only(tool_input) else "read-write"
 
     if groups and groups[-1].type == call_type:
@@ -55,7 +57,7 @@ def run_tool_use(
       - yields AgentEvent objects from generator-based executors
       - sets .result to (ToolResult, llm_text, is_error)
     """
-    if tool_name not in ALL_TOOLS:
+    if tool_name not in tool_registry.list_names():
         return AsyncGenWithResult.of_value(
             (ToolResult(data=None), f"No such tool: '{tool_name}'", True)
         )
@@ -67,7 +69,9 @@ def run_tool_use(
             (ToolResult(data=None), f"Tool '{tool_name}' is not available in current context", True)
         )
     else:
-        tool = ALL_TOOLS[tool_name]
+        resolved = tool_registry.get(tool_name)
+        assert resolved is not None
+        tool = resolved
 
     _tool = tool
 
@@ -81,7 +85,7 @@ def run_tool_use(
                 decision = context.permissions.check(tool_name, content)
 
                 if decision.behavior == "deny":
-                    msg = decision.message or "Permission denied"
+                    msg = decision.message or "Permission denied,You do not have permission to access this path[{content}]."
                     yield PermissionDenied(label=label, tool_name=tool_name, message=msg)
                     run.set_result((ToolResult(data=None), id, msg, True))
                     yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=msg)
@@ -104,7 +108,7 @@ def run_tool_use(
                             source="session",
                         ))
                     else:
-                        deny_msg = "User denied permission"
+                        deny_msg = "User denied permission,You do not have permission to access this path[{content}]."
                         run.set_result((ToolResult(data=None), id, deny_msg, True))
                         yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg)
                         return

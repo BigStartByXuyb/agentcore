@@ -103,21 +103,14 @@ def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
     Resolution order (mirrors Claude Code's tool resolution):
       1. Start with allowed_tools whitelist (or all tools if None)
       2. Subtract disallowed_tools blacklist
-
-    The 'agent' tool is NOT automatically excluded — sub-agents can spawn
-    further sub-agents as long as depth < MAX_AGENT_DEPTH. Agent definitions
-    can explicitly add 'agent' to disallowed_tools if they are leaf agents
-    that should not delegate.
     """
-    from src.tools import ALL_TOOLS  # local import to avoid circular
+    from src.tools import registry as tool_registry
 
     if agent_def.allowed_tools is not None:
-        # Whitelist — intersect with ALL_TOOLS to discard unknown names
         whitelist = set(agent_def.allowed_tools)
-        tools = [name for name in ALL_TOOLS if name in whitelist]
+        tools = [name for name in tool_registry.list_names() if name in whitelist]
     else:
-        # No whitelist — all tools available
-        tools = list(ALL_TOOLS.keys())
+        tools = tool_registry.list_names()
 
     # Apply disallowed_tools blacklist
     if agent_def.disallowed_tools:
@@ -190,6 +183,7 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
         tools=sub_tool_names,
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
+        permissions=context.permissions.as_silent() if context.permissions else None,
     )
 
     # --- Sub-agent state ---

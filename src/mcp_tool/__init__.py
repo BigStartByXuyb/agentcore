@@ -141,10 +141,16 @@ def load_mcp_tools() -> tuple[list[ToolDef], list[str]]:
             
     return tool_defs, err_msgs
 
-def register_mcp_tools(all_tools: dict[str, ToolDef]) -> None:
-    """Append MCP ToolDefs into the given ALL_TOOLS registry."""
-    for td in load_mcp_tools()[0]:
-        all_tools[td.name] = td
+def register_mcp_tools(tool_registry) -> None:
+    """Append MCP ToolDefs into the given ToolRegistry."""
+    tool_defs, _ = load_mcp_tools()
+    for td in tool_defs:
+        source = "mcp"
+        for srv_name, srv in _servers.items():
+            if td.name in srv.tool_names:
+                source = f"mcp:{srv_name}"
+                break
+        tool_registry.register(td.name, td, source=source)
 
 
 

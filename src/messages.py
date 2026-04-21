@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from src.types import ToolResultContent, Attachment
-from src.tools import ALL_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +97,7 @@ def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Attachment | None:
 
 # tools checking and schema construction for the API "tools" parameter is centralized
 def build_tool_schemas(
+    registry,
     allowed_tools: list[str] | None = None,
     tool_overrides: dict | None = None,
 ) -> list[dict]:
@@ -105,18 +105,12 @@ def build_tool_schemas(
 
     If allowed_tools is provided, only include schemas for tools in the list.
     If tool_overrides is provided, use overridden ToolDef.schema for matching names.
-
-    Previously the Skill tool was force-included via an always_include set.
-    That's been removed: whether Skill is available is now fully controlled
-    by allowed_tools / disallowed_tools in the ToolUseContext.  The Skill
-    tool's context_modifier (inline mode) already includes "Skill" in its
-    own allowed_tools list, so skills that restrict tools still work.
     """
     overrides = tool_overrides or {}
 
     if allowed_tools is None:
         result = []
-        for name, tool in ALL_TOOLS.items():
+        for name, tool in registry.items():
             if name in overrides:
                 result.append(overrides[name].schema)
             else:
@@ -124,7 +118,7 @@ def build_tool_schemas(
         return result
 
     result = []
-    for name, tool in ALL_TOOLS.items():
+    for name, tool in registry.items():
         if name in allowed_tools:
             if name in overrides:
                 result.append(overrides[name].schema)

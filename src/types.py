@@ -348,7 +348,7 @@ class ToolUseContext:
     tools: list[str]
     depth: int = 0
     abort_signal: bool = False
-    tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for ALL_TOOLS lookup
+    tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for registry lookup
     permissions: Any | None = None      # PermissionEngine instance (avoid circular import)
 
 
@@ -398,7 +398,6 @@ class ToolDef:
     Required: schema, executor, map_result.
     Optional fields have safe defaults matching Claude Code's buildTool():
       - is_enabled:           default True
-      - is_concurrency_safe:  default False  (fail-closed)
       - is_read_only:         default False  (fail-closed)
       - is_destructive:       default False
       - max_result_size_chars: default 30_000
@@ -408,7 +407,6 @@ class ToolDef:
     executor: Callable[[dict, ToolUseContext], ToolExecutorReturn]
     map_result: Callable[[Any], str]
     is_enabled: Callable[[], bool]
-    is_concurrency_safe: Callable[[dict], bool]
     is_read_only: Callable[[dict], bool]
     is_destructive: Callable[[dict], bool]
     max_result_size_chars: int
@@ -420,7 +418,6 @@ class ToolDef:
         executor: Callable[[dict, ToolUseContext], ToolExecutorReturn],
         map_result: Callable[[Any], str],
         is_enabled: Callable[[], bool] | None = None,
-        is_concurrency_safe: Callable[[dict], bool] | None = None,
         is_read_only: Callable[[dict], bool] | None = None,
         is_destructive: Callable[[dict], bool] | None = None,
         max_result_size_chars: int = 30_000,
@@ -429,7 +426,6 @@ class ToolDef:
         self.executor = executor
         self.map_result = map_result
         self.is_enabled = is_enabled or (lambda: True)
-        self.is_concurrency_safe = is_concurrency_safe or (lambda _: False)
         self.is_read_only = is_read_only or (lambda _: False)
         self.is_destructive = is_destructive or (lambda _: False)
         self.max_result_size_chars = max_result_size_chars

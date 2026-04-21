@@ -33,7 +33,7 @@ from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
 from src.tool_runner import merge_tool_call,execute_tool_groups
-from src.tools import ALL_TOOLS
+from src.tools import registry as tool_registry
 from src.api import query_model, create_stream_with_retry
 from src.errors import create_assistant_error_message
 from src.events import (
@@ -120,7 +120,11 @@ def run_agent_loop(
                     last_msg = tool_use_context.messages.last_user_message()
                     if last_msg is not None:
                         last_msg.attach([mem])
-            tools = build_tool_schemas(tool_use_context.tools, tool_use_context.tool_overrides)
+            tools = build_tool_schemas(
+                tool_registry,
+                allowed_tools=tool_use_context.tools,
+                tool_overrides=tool_use_context.tool_overrides,
+            )
             pending_retry_events.clear()
 
             # --- Call LLM ---
@@ -267,7 +271,7 @@ async def agent_loop(
     """
     user_msg = history.add_user(user_input)
 
-    main_tools = list(ALL_TOOLS.keys())
+    main_tools = tool_registry.list_names()
 
     # --- Independent reminder channels (each can be reloaded separately) ---
     skill_rem = build_skill_reminder(main_tools, use_sent_tracking=True)
@@ -290,7 +294,7 @@ async def agent_loop(
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
         messages=history,
-        tools=list(ALL_TOOLS.keys()),
+        tools=tool_registry.list_names(),
         permissions=_get_permission_engine(),
     )
 

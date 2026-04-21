@@ -221,12 +221,11 @@ def _execute_fork(
         "When finished, provide a clear, concise result.\n"
     )
 
-    from src.tools import ALL_TOOLS
-
     if skill.allowed_tools:
         sub_tool_names = list(skill.allowed_tools)
     else:
-        sub_tool_names = list(ALL_TOOLS.keys())
+        from src.tools import registry as tool_registry
+        sub_tool_names = tool_registry.list_names()
 
     from src.messages import build_metadata_reminders
 
@@ -245,6 +244,7 @@ def _execute_fork(
         tools=sub_tool_names,
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
+        permissions=context.permissions.as_silent() if context.permissions else None,
     )
 
     sub_state = AgentState(agent_id=f"fork:{skill.name}")

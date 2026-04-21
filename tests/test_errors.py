@@ -185,6 +185,7 @@ class TestBuildToolResultContent:
 
 class TestRunToolUse:
     def _make_context(self):
+        from src.tools import registry
         return ToolUseContext(messages=[], tools=["bash"])
 
     def test_unknown_tool(self):
@@ -196,17 +197,17 @@ class TestRunToolUse:
 
     def test_executor_exception(self):
         from src.tool_runner import run_tool_use
-        from src.tools import ALL_TOOLS
+        from src.tools import registry
         from src.types import ToolDef
 
         def bad_executor(inputs, ctx):
             raise ValueError("boom")
 
-        ALL_TOOLS["_test_bad"] = ToolDef(
+        registry.register("_test_bad", ToolDef(
             schema={"name": "_test_bad"},
             executor=bad_executor,
             map_result=lambda d: str(d),
-        )
+        ))
         try:
             result, text, is_error = _drain(run_tool_use("_test_bad", {}, "id-1", self._make_context()))
             assert is_error is True
@@ -214,11 +215,11 @@ class TestRunToolUse:
             assert "ValueError" in text
             assert "boom" in text
         finally:
-            del ALL_TOOLS["_test_bad"]
+            registry.unregister("_test_bad")
 
     def test_map_result_exception(self):
         from src.tool_runner import run_tool_use
-        from src.tools import ALL_TOOLS
+        from src.tools import registry
         from src.types import ToolDef
 
         def ok_executor(inputs, ctx):
@@ -227,35 +228,35 @@ class TestRunToolUse:
         def bad_map(data):
             raise TypeError("can't format")
 
-        ALL_TOOLS["_test_bad_map"] = ToolDef(
+        registry.register("_test_bad_map", ToolDef(
             schema={"name": "_test_bad_map"},
             executor=ok_executor,
             map_result=bad_map,
-        )
+        ))
         try:
             result, text, is_error = _drain(run_tool_use("_test_bad_map", {}, "id-1", self._make_context()))
             assert is_error is True
             assert "map_result failed" in text
             assert "TypeError" in text
         finally:
-            del ALL_TOOLS["_test_bad_map"]
+            registry.unregister("_test_bad_map")
 
     def test_success_returns_false(self):
         from src.tool_runner import run_tool_use
-        from src.tools import ALL_TOOLS
+        from src.tools import registry
         from src.types import ToolDef
 
-        ALL_TOOLS["_test_ok"] = ToolDef(
+        registry.register("_test_ok", ToolDef(
             schema={"name": "_test_ok"},
             executor=lambda i, c: ToolResult(data="hello"),
             map_result=lambda d: d,
-        )
+        ))
         try:
             result, text, is_error = _drain(run_tool_use("_test_ok", {}, "id-1", self._make_context()))
             assert is_error is False
             assert text == "hello"
         finally:
-            del ALL_TOOLS["_test_ok"]
+            registry.unregister("_test_ok")
 
 
 # =========================================================================

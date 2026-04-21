@@ -169,11 +169,6 @@ def is_read_only(inputs: dict) -> bool:
     return True
 
 
-def is_concurrency_safe(inputs: dict) -> bool:
-    """Bash is concurrency-safe only when the command is read-only."""
-    return is_read_only(inputs)
-
-
 def is_destructive(inputs: dict) -> bool:
     """True for commands that perform irreversible operations."""
     command: str = inputs.get("command", "")
@@ -194,8 +189,7 @@ tool = ToolDef(
     schema=SCHEMA,
     executor=executor,
     map_result=map_result,
-    is_concurrency_safe=is_concurrency_safe,
     is_read_only=is_read_only,
     is_destructive=is_destructive,
-    max_result_size_chars=30_000,  # matches Claude Code BashTool
+    max_result_size_chars=30_000,
 )

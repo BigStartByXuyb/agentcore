@@ -131,15 +131,10 @@ def is_read_only(inputs: dict) -> bool:
     return True
 
 
-def is_concurrency_safe(inputs: dict) -> bool:
-    return True
-
-
 tool = ToolDef(
     schema=SCHEMA,
     executor=executor,
     map_result=map_result,
-    is_concurrency_safe=is_concurrency_safe,
     is_read_only=is_read_only,
-    max_result_size_chars=20_000,  # matches Claude Code GrepTool
+    max_result_size_chars=20_000,
 )

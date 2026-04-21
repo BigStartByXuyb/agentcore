@@ -116,15 +116,10 @@ def is_read_only(inputs: dict) -> bool:
     return True
 
 
-def is_concurrency_safe(inputs: dict) -> bool:
-    return True
-
-
 tool = ToolDef(
     schema=SCHEMA,
     executor=executor,
     map_result=map_result,
-    is_concurrency_safe=is_concurrency_safe,
     is_read_only=is_read_only,
     # Output bounded by limit param; persisting creates circular Read→file→Read loop.
     # Matches Claude Code FileReadTool: maxResultSizeChars = Infinity

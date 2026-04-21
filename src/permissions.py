@@ -115,10 +115,12 @@ class PermissionEngine:
         *,
         user_config: str | None = None,
         project_config: str | None = None,
+        silent: bool = False,
     ) -> None:
         self._user_rules: list[PermissionRule] = []
         self._project_rules: list[PermissionRule] = []
         self._session_rules: list[PermissionRule] = []
+        self._silent = silent
 
         if user_config:
             self._user_rules = self._load_config(user_config, "user")
@@ -184,7 +186,18 @@ class PermissionEngine:
             if self._matches(rule, tool_name, content):
                 return PermissionDecision(behavior="allow", matched_rule=rule)
 
-        return PermissionDecision(behavior="ask")
+        return PermissionDecision(
+            behavior="deny" if self._silent else "ask",
+            message="Sub-agent cannot prompt for permission" if self._silent else None,
+        )
+
+    def as_silent(self) -> "PermissionEngine":
+        """Create a silent copy for sub-agents — ask becomes deny."""
+        clone = PermissionEngine(silent=True)
+        clone._user_rules = self._user_rules
+        clone._project_rules = self._project_rules
+        clone._session_rules = self._session_rules
+        return clone
 
     @staticmethod
     def _matches(rule: PermissionRule, tool_name: str, content: str | None) -> bool:

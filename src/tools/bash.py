@@ -7,6 +7,7 @@ import shutil
 import re
 
 from src.types import ToolResult, ToolDef, ToolUseContext
+from src.sandbox import sandbox_manager
 
 SCHEMA: dict = {
     "name": "bash",
@@ -52,6 +53,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         shell_cmd = [_BASH_PATH, "-c", command]
     else:
         shell_cmd = ["cmd", "/c", command]
+
+    if sandbox_manager.is_enabled() and not sandbox_manager.is_command_excluded(command):
+        shell_cmd = sandbox_manager.wrap_command(shell_cmd)
 
     try:
         proc = await asyncio.create_subprocess_exec(

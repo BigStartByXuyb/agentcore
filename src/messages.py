@@ -57,8 +57,8 @@ def _build_skill_reminder_msg(
 ) -> Attachment | None:
     """Build the skill reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
-        from src.skills import build_skill_reminder
-        return build_skill_reminder()
+        from src.skills import build_skill_attachment
+        return build_skill_attachment()
 
     from src.skills import get_skills, format_skill_listing
     all_skills = get_skills()
@@ -80,8 +80,8 @@ def _build_skill_reminder_msg(
 def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Attachment | None:
     """Build the agent reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
-        from src.agents import build_agent_reminder
-        return build_agent_reminder()
+        from src.agents import build_agent_attachment
+        return build_agent_attachment()
 
     from src.agents import get_agents, format_agent_listing
     all_agents = get_agents()

@@ -16,7 +16,7 @@ import threading
 from dataclasses import dataclass, field
 from src.mcp_tool.config import McpServerConfig, load_mcp_configs
 from src.types import ToolDef, ToolResult
-from typing import Any
+from typing import Any, Callable
 from src.mcp_tool.McpHttpClient import McpHttpClient
 from src.mcp_tool.McpPipelineClient import McpPipelineClient
 from src.mcp_tool.base import McpClientBase as McpClientBase
@@ -64,7 +64,7 @@ def _make_mcp_schema(qualified_name: str, tool: dict[str, Any]) -> dict:
             tool["input_schema"],
 
     }
-def _make_mcp_executor(tool_name:str, client: McpClientBase) -> callable:
+def _make_mcp_executor(tool_name:str, client: McpClientBase) -> Callable:
     """Factory: returns an executor that invokes one specific remote MCP tool."""
     def _executor(inputs: dict, ctx) -> ToolResult:
         result = client.call_tool(tool_name, inputs)   # CallToolResult

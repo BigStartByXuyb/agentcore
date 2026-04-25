@@ -5,12 +5,13 @@ Corresponds to Claude Code's src/services/extractMemories/extractMemories.ts.
 After the main agent produces a final response (end_turn), this module
 runs a forked agent that reviews the conversation and extracts durable
 memories worth saving.  The forked agent uses a restricted tool set
-(only bash for writing files).
+(read_file + path-restricted write_file, limited to the memory directory).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import AsyncIterator
 
 from src import config
@@ -24,32 +25,35 @@ from src.memory.scan import scan_memory_files, format_memory_manifest
 
 logger = logging.getLogger(__name__)
 
-# Minimum messages in history before extraction triggers
 _MIN_MESSAGES = 4
 
 # ---------------------------------------------------------------------------
-# Sandboxed bash tool — only allows writes to the memory directory
+# Restricted write_file tool — only allows writes to the memory directory
 # ---------------------------------------------------------------------------
 
-def _make_sandboxed_bash(memory_dir: str) -> ToolDef:
-    """Create a bash ToolDef that rejects commands targeting paths outside memory_dir."""
-    from src.tools.bash import SCHEMA, map_result, executor as real_executor
+def _make_restricted_write_file(memory_dir: str) -> ToolDef:
+    """Create a write_file ToolDef restricted to paths inside memory_dir."""
+    from src.tools.write_file import SCHEMA, map_result, executor as real_executor
 
-    mem_dir_fwd = memory_dir.replace("\\", "/")
+    mem_dir_resolved = os.path.realpath(memory_dir)
 
     async def sandboxed_executor(inputs: dict, context: ToolUseContext) -> ToolResult:
-        command: str = inputs.get("command", "")
-        cmd_normalized = command.replace("\\", "/")
-
-        if mem_dir_fwd not in cmd_normalized:
+        file_path: str = inputs.get("file_path", "")
+        try:
+            target_resolved = os.path.realpath(file_path)
+        except (ValueError, OSError):
             return ToolResult(data={
-                "stdout": "",
-                "stderr": (
-                    f"Permission denied: extraction agent can only write to {mem_dir_fwd}\n"
-                    f"Command was: {command}"
+                "type": "error",
+                "content": f"Invalid path: {file_path}",
+            })
+
+        if not target_resolved.startswith(mem_dir_resolved + os.sep) and target_resolved != mem_dir_resolved:
+            return ToolResult(data={
+                "type": "error",
+                "content": (
+                    f"Permission denied: extraction agent can only write to {memory_dir}\n"
+                    f"Attempted path: {file_path}"
                 ),
-                "exit_code": -1,
-                "interrupted": False,
             })
 
         return await real_executor(inputs, context)
@@ -79,7 +83,8 @@ Memory directory: {memory_dir}
 - Anything already in existing memories
 
 ## How to save
-Use the bash tool to write files. Each memory is a .md file with frontmatter:
+Use the write_file tool to create files. Use read_file to check existing files.
+Each memory is a .md file with frontmatter:
 
 ```markdown
 ---
@@ -146,13 +151,13 @@ def run_memory_extraction(
     )]
 
     extraction_history = MessageHistory(extraction_messages)
-    sandboxed_bash = _make_sandboxed_bash(mem_dir)
+    restricted_write = _make_restricted_write_file(mem_dir)
 
     tool_use_context = ToolUseContext(
         messages=extraction_history,
-        tools=["bash"],
+        tools=["read_file", "write_file"],
         depth=1,
-        tool_overrides={"bash": sandboxed_bash},
+        tool_overrides={"write_file": restricted_write},
     )
 
     async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
@@ -179,7 +184,7 @@ def run_memory_extraction(
 
 def _has_memory_writes(messages: list[Message], memory_dir: str, since_index: int = 0) -> bool:
     """Check if any assistant message (from since_index onwards) wrote to memory."""
-    mem_dir_normalized = memory_dir.replace("\\", "/")
+    mem_dir_resolved = os.path.realpath(memory_dir)
 
     for msg in messages[since_index:]:
         if msg.role != "assistant":
@@ -190,9 +195,17 @@ def _has_memory_writes(messages: list[Message], memory_dir: str, since_index: in
         for block in content:
             if not isinstance(block, ToolUseContent):
                 continue
-            if block.name == "bash":
+            if block.name == "write_file":
+                path = block.input.get("file_path", "")
+                try:
+                    if os.path.realpath(path).startswith(mem_dir_resolved):
+                        return True
+                except (ValueError, OSError):
+                    continue
+            elif block.name == "bash":
                 cmd = block.input.get("command", "")
-                if mem_dir_normalized in cmd.replace("\\", "/"):
+                mem_fwd = memory_dir.replace("\\", "/")
+                if mem_fwd in cmd.replace("\\", "/"):
                     return True
     return False
 

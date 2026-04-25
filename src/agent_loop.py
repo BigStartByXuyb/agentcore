@@ -322,7 +322,7 @@ async def agent_loop(
             extraction_gen = run_memory_extraction(
                 messages_snapshot, get_memory_dir(), since_index=turn_start_index,
             )
-            await consume_events(extraction_gen, lambda _e: None)
+            await consume_events(extraction_gen, lambda _e: None, interactive=False)
         except Exception as e:
             logger.debug("Background memory extraction failed: %s", e)
 

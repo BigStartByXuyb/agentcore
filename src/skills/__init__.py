@@ -187,17 +187,10 @@ def discover_skills(skills_dirs: list[str] | None = None) -> dict[str, SkillInfo
 
     Later entries override earlier ones (project skills override global).
     """
-    home = os.path.expanduser("~")
     if skills_dirs is None:
-        cwd = os.getcwd()
-        skills_dirs = [
-            os.path.join(cwd, "skills"),
-            os.path.join(cwd, ".claude", "skills"),
-        ]
+        from src.config import get_skill_dirs
+        skills_dirs = get_skill_dirs()
 
-    if os.path.join(home, ".claude", "skills") not in skills_dirs:
-        skills_dirs.append(os.path.join(home, ".claude", "skills"))
-        
     skills: dict[str, SkillInfo] = {}
 
     for base_dir in skills_dirs:
@@ -286,7 +279,7 @@ def format_skill_listing(
 _sent_skill_names: set[str] = set()
 
 
-def build_skill_reminder(force: bool = False) -> Attachment | None:
+def build_skill_attachment(force: bool = False) -> Attachment | None:
     """Build a <system-reminder> user message listing available skills.
 
     Returns a Message ready to inject, or None if nothing new to announce.
@@ -324,7 +317,7 @@ def build_skill_reminder(force: bool = False) -> Attachment | None:
 def reset_sent_skills() -> None:
     """Clear the sent-skill tracker (e.g. on /clear or session reset).
 
-    After calling this, the next build_skill_reminder() will re-announce
+    After calling this, the next build_skill_attachment() will re-announce
     all skills.
     """
     global _sent_skill_names

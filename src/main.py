@@ -21,6 +21,7 @@ from src.agent_loop import agent_loop
 from src.types import AgentState, MessageHistory
 from src.mcp_tool import register_mcp_tools
 from src.tools import registry as tool_registry
+from src.watcher import start_watchers
 
 
 async def async_main() -> None:
@@ -28,11 +29,16 @@ async def async_main() -> None:
         print("Error: ANTHROPIC_AUTH_TOKEN environment variable is not set.")
         sys.exit(1)
 
-    print("my-agent ready. Type 'exit' to quit.\n")
+    from src.sandbox import sandbox_manager
+    from src.memory.paths import ensure_memory_dir
+    ensure_memory_dir()
+    print(f"my-agent ready. {sandbox_manager.status_summary()}")
+    print("Type 'exit' to quit.\n")
 
     history = MessageHistory()
     state = AgentState()
     register_mcp_tools(tool_registry)
+    flags = start_watchers(asyncio.get_running_loop())
 
     while True:
         try:
@@ -47,6 +53,17 @@ async def async_main() -> None:
         if stripped in ("exit", "quit"):
             print("Bye.")
             break
+
+        if flags.skills_changed.is_set():
+            flags.skills_changed.clear()
+            from src.skills import get_skills, reset_sent_skills
+            get_skills(force_reload=True)
+            reset_sent_skills()
+            print("[watcher] Skills reloaded.")
+
+        if flags.memory_changed.is_set():
+            flags.memory_changed.clear()
+            print("[watcher] Memory files changed — will pick up on next recall.")
 
         try:
             await agent_loop(stripped, history, state)

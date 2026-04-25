@@ -227,17 +227,25 @@ def _execute_fork(
         from src.tools import registry as tool_registry
         sub_tool_names = tool_registry.list_names()
 
-    from src.messages import build_metadata_reminders
+    from src.messages import build_skill_reminder, build_agent_reminder
 
     sub_history = MessageHistory(initial_messages)
 
     msg = sub_history.last_user_message()
     if msg is not None:
-        msg.attach(build_metadata_reminders(
+        attachments = []
+        skill_rem = build_skill_reminder(
             sub_tool_names,
             use_sent_tracking=False,
             exclude_fork_skills=True,
-        ))
+        )
+        if skill_rem:
+            attachments.append(skill_rem)
+        agent_rem = build_agent_reminder(sub_tool_names, use_sent_tracking=False)
+        if agent_rem:
+            attachments.append(agent_rem)
+        if attachments:
+            msg.attach(attachments)
 
     sub_context = ToolUseContext(
         messages=sub_history,

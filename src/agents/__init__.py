@@ -170,11 +170,8 @@ def discover_agents(agents_dirs: list[str] | None = None) -> dict[str, AgentDefi
     agents: dict[str, AgentDefinition] = dict(_BUILTIN_AGENTS)
 
     if agents_dirs is None:
-        cwd = os.getcwd()
-        agents_dirs = [
-            os.path.join(cwd, "agents"),
-            os.path.join(cwd, ".claude", "agents"),
-        ]
+        from src.config import get_agent_dirs
+        agents_dirs = get_agent_dirs()
 
     for base_dir in agents_dirs:
         if not os.path.isdir(base_dir):
@@ -223,7 +220,7 @@ def list_agents() -> list[AgentDefinition]:
 
 
 # ---------------------------------------------------------------------------
-# Agent listing / reminder injection (mirrors skills' build_skill_reminder)
+# Agent listing / reminder injection (mirrors skills' build_skill_attachment)
 # ---------------------------------------------------------------------------
 
 _MAX_LISTING_DESC_CHARS = 200
@@ -248,7 +245,7 @@ def format_agent_listing(agents: dict[str, AgentDefinition]) -> str:
     return "\n".join(lines)
 
 
-def build_agent_reminder(force: bool = False) -> Attachment | None:
+def build_agent_attachment(force: bool = False) -> Attachment | None:
     """Build a <system-reminder> user message listing available agents.
 
     Returns None if there are no new agents to announce.

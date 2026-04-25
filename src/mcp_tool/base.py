@@ -48,7 +48,7 @@ class McpClientBase(ABC):
             raise RuntimeError(
                 f"MCP server {self._cfg.name!r} failed to connect within {timeout}s"
             )
-        if self._lifecycle_fut.done():
+        if self._lifecycle_fut is not None and self._lifecycle_fut.done():
             exc = self._lifecycle_fut.exception()
             if exc is not None:
                 raise exc
@@ -76,6 +76,8 @@ class McpClientBase(ABC):
         return fut.result(timeout=30)
 
     async def _list_tools_async(self) -> dict[str, list[dict[str, Any]]]:
+        if self._session is None:
+            raise RuntimeError("Session not initialized")
         result = await self._session.list_tools()
         return {self._cfg.name: [
             {"name": t.name, "description": t.description or "", "input_schema": t.inputSchema}

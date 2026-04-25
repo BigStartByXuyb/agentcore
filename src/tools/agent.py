@@ -165,17 +165,25 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
         Message(role="user", content=prompt, msg_type="human")
     ]
 
-    from src.messages import build_metadata_reminders
+    from src.messages import build_skill_reminder, build_agent_reminder
 
     sub_history = MessageHistory(initial_messages)
     msg = sub_history.last_user_message()
     if msg is not None:
-        msg.attach(build_metadata_reminders(
+        attachments = []
+        skill_rem = build_skill_reminder(
             sub_tool_names,
             use_sent_tracking=False,
             skill_filter=agent_def.skills,
             exclude_fork_skills=True,
-        ))
+        )
+        if skill_rem:
+            attachments.append(skill_rem)
+        agent_rem = build_agent_reminder(sub_tool_names, use_sent_tracking=False)
+        if agent_rem:
+            attachments.append(agent_rem)
+        if attachments:
+            msg.attach(attachments)
 
     # --- Sub-agent context ---
     sub_context = ToolUseContext(

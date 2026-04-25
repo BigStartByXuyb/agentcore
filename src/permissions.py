@@ -201,6 +201,6 @@ class PermissionEngine:
 
     @staticmethod
     def _matches(rule: PermissionRule, tool_name: str, content: str | None) -> bool:
-        if rule.tool_name != tool_name and rule.tool_name != "*":
+        if rule.tool_name.lower() != tool_name.lower() and rule.tool_name.lower() != "*":
             return False
         return match_content(rule.content_pattern, content)

@@ -10,6 +10,7 @@ from collections.abc import ItemsView
 from src.types import ToolDef
 from src.tools.bash import tool as bash_tool
 from src.tools.read_file import tool as read_file_tool
+from src.tools.write_file import tool as write_file_tool
 from src.tools.grep import tool as grep_tool
 from src.tools.skill import tool as skill_tool
 from src.tools.agent import tool as agent_tool
@@ -58,6 +59,7 @@ class ToolRegistry:
 registry = ToolRegistry()
 registry.register(bash_tool.name, bash_tool)
 registry.register(read_file_tool.name, read_file_tool)
+registry.register(write_file_tool.name, write_file_tool)
 registry.register(grep_tool.name, grep_tool)
 registry.register(skill_tool.name, skill_tool)
 registry.register(agent_tool.name, agent_tool)

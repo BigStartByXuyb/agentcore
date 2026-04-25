@@ -95,19 +95,27 @@ def default_handler(event: AgentEvent) -> None:
 async def consume_events(
     gen: AsyncGenWithResult,
     handler: Callable[[AgentEvent], None] | None = None,
+    *,
+    interactive: bool = True,
 ):
     """Drain an AsyncGenWithResult, dispatch events, return final value.
 
-    PermissionRequest events are handled inline: we prompt the user
-    via asyncio.to_thread(input) and fill the Future so the tool_runner
-    can resume.
+    PermissionRequest events are handled inline when interactive=True:
+    we prompt the user via asyncio.to_thread(input) and fill the Future
+    so the tool_runner can resume.
+
+    When interactive=False (background tasks), PermissionRequest is
+    auto-denied — no user prompt is possible.
     """
     async for event in gen.events():
         if isinstance(event, PermissionRequest) and event.future is not None:
-            summary = _summarize_input(event.tool_input)
-            prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
-            answer = await asyncio.to_thread(input, prompt)
-            event.future.set_result(answer.strip().lower())
+            if interactive:
+                summary = _summarize_input(event.tool_input)
+                prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
+                answer = await asyncio.to_thread(input, prompt)
+                event.future.set_result(answer.strip().lower())
+            else:
+                event.future.set_result("n")
         elif handler is not None:
             handler(event)
     return gen.result

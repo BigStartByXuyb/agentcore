@@ -24,12 +24,9 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
-from typing import AsyncIterator
-
 from src import config
 from src.types import (
     AgentState,
-    AsyncGenWithResult,
     Message,
     MessageHistory,
     ToolDef,
@@ -79,56 +76,41 @@ SKILL_SCHEMA = {
 # Executor — dispatches to inline or fork mode
 # ---------------------------------------------------------------------------
 
-def _execute(
+async def _execute(
     inputs: dict,
     context: ToolUseContext,
-) -> AsyncGenWithResult:
+) -> ToolResult:
     """Execute a skill by name.
 
-    Inline mode (is_fork=False):
-      Returns an AsyncGenWithResult whose .result is a ToolResult with
-      new_messages containing the skill content wrapped in <skill-content>
-      tags, plus a context_modifier that restricts tools if allow_tools
-      is set.  No events are yielded.
-
-    Fork mode (is_fork=True):
-      Returns an AsyncGenWithResult that yields sub-agent events as they
-      happen and, on completion, sets .result to a ToolResult containing
-      the final text.
+    Inline mode: returns ToolResult with new_messages + context_modifier.
+    Fork mode: launches sub-agent loop via context.on_event, returns ToolResult.
     """
     skill_name = inputs.get("skill", "").strip()
     if not skill_name:
-        return AsyncGenWithResult.of_value(
-            ToolResult(data={"success": False, "error": "No skill name provided"})
-        )
+        return ToolResult(data={"success": False, "error": "No skill name provided"})
 
-    # Strip leading slash for compatibility ("/commit" → "commit")
     if skill_name.startswith("/"):
         skill_name = skill_name[1:]
 
     skill = get_skill(skill_name)
     if skill is None:
-        return AsyncGenWithResult.of_value(
-            ToolResult(data={"success": False, "error": f"Unknown skill: {skill_name}"})
-        )
+        return ToolResult(data={"success": False, "error": f"Unknown skill: {skill_name}"})
 
     # --- Fork mode ---
-    # Fork skills launch a sub-agent loop, which increases depth.
-    # Block only when we've already hit the maximum nesting depth.
     if skill.is_fork:
         if context.depth >= config.MAX_AGENT_DEPTH:
-            return AsyncGenWithResult.of_value(ToolResult(data={
+            return ToolResult(data={
                 "success": False,
                 "error": (
                     f"Fork skill '{skill_name}' cannot be invoked: "
                     f"maximum agent depth ({config.MAX_AGENT_DEPTH}) reached "
                     f"(current depth: {context.depth})."
                 ),
-            }))
-        return _execute_fork(skill, inputs, context)
+            })
+        return await _execute_fork(skill, inputs, context)
 
     # --- Inline mode ---
-    return AsyncGenWithResult.of_value(_execute_inline(skill, inputs, context))
+    return _execute_inline(skill, inputs, context)
 
 
 # ---------------------------------------------------------------------------
@@ -136,10 +118,7 @@ def _execute(
 # ---------------------------------------------------------------------------
 
 def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
-    """Inline execution: return new_messages + optional context_modifier.
-
-    Mirrors SkillTool.ts call() path for context != 'fork'.
-    """
+    """Inline execution: return new_messages + optional context_modifier."""
     content = build_skill_content(skill)
     args = inputs.get("args", "")
     if args:
@@ -181,19 +160,15 @@ def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
 # Fork mode — launch an isolated sub-agent loop
 # ---------------------------------------------------------------------------
 
-def _execute_fork(
+async def _execute_fork(
     skill,
     inputs: dict,
     context: ToolUseContext,
-) -> AsyncGenWithResult:
+) -> ToolResult:
     """Fork execution: run skill in an isolated sub-agent loop.
 
-    Returns an AsyncGenWithResult that:
-      - yields each AgentEvent from the sub-agent loop (bubbling up)
-      - on completion, sets .result to the final ToolResult
-
-    Mirrors executeForkedSkill() in SkillTool.ts + prepareForkedCommandContext()
-    in forkedAgent.ts.
+    Events are emitted via context.on_event callback.
+    Returns the final ToolResult.
     """
     content = build_skill_content(skill)
     args = inputs.get("args", "")
@@ -253,42 +228,38 @@ def _execute_fork(
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
         permissions=context.permissions.as_silent() if context.permissions else None,
+        on_event=context.on_event,
     )
 
     sub_state = AgentState(agent_id=f"fork:{skill.name}")
     label = f"fork:{skill.name}"
+    on_event = context.on_event
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator:
-        try:
-            from src.agent_loop import run_agent_loop  # local import to avoid circular
+    try:
+        from src.agent_loop import run_agent_loop
 
-            gen = run_agent_loop(
-                system_prompt=sub_system_prompt,
-                tool_use_context=sub_context,
-                max_turns=config.MAX_TURNS,
-                state=sub_state,
-                label=label,
-            )
-            async for ev in gen.events():
-                yield ev
-            result_text = gen.result
-        except Exception as e:
-            run.set_result(ToolResult(data={
-                "success": False,
-                "commandName": skill.name,
-                "error": f"Fork execution failed: {e}",
-            }))
-            return
-
-        run.set_result(ToolResult(data={
-            "success": True,
+        result_text = await run_agent_loop(
+            system_prompt=sub_system_prompt,
+            tool_use_context=sub_context,
+            max_turns=config.MAX_TURNS,
+            state=sub_state,
+            label=label,
+            on_event=on_event,
+        )
+    except Exception as e:
+        return ToolResult(data={
+            "success": False,
             "commandName": skill.name,
-            "status": "forked",
-            "agentId": sub_state.agent_id,
-            "result": result_text,
-        }))
+            "error": f"Fork execution failed: {e}",
+        })
 
-    return AsyncGenWithResult(_impl)
+    return ToolResult(data={
+        "success": True,
+        "commandName": skill.name,
+        "status": "forked",
+        "agentId": sub_state.agent_id,
+        "result": result_text,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +267,7 @@ def _execute_fork(
 # ---------------------------------------------------------------------------
 
 def _map_result(data: dict) -> str:
-    """Convert executor data to LLM-readable text.
-
-    Mirrors mapToolResultToToolResultBlockParam() in SkillTool.ts.
-    For inline: "Launching skill: <name>"
-    For forked: "Skill '<name>' completed (forked).\n\nResult:\n..."
-    For errors: the error message
-    """
+    """Convert executor data to LLM-readable text."""
     if not data.get("success"):
         return f"Error: {data.get('error', 'Unknown error')}"
 
@@ -313,7 +278,6 @@ def _map_result(data: dict) -> str:
         result = data.get("result", "")
         return f'Skill "{name}" completed (forked execution).\n\nResult:\n{result}'
 
-    # inline
     return f"Launching skill: {name}"
 
 

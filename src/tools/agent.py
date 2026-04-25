@@ -13,12 +13,9 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
-from typing import AsyncIterator
-
 from src import config
 from src.types import (
     AgentState,
-    AsyncGenWithResult,
     Message,
     MessageHistory,
     ToolDef,
@@ -45,7 +42,7 @@ _DEFAULT_AGENT = AgentDefinition(
         "- When finished, provide a clear summary of what you did\n"
     ),
     max_turns=20,
-    allowed_tools=None,  # all tools except agent itself
+    allowed_tools=None,
 )
 
 
@@ -54,7 +51,6 @@ _DEFAULT_AGENT = AgentDefinition(
 # ---------------------------------------------------------------------------
 
 def _build_agent_description() -> str:
-    """Build the tool description. Agent listing is injected via system-reminder."""
     return (
         "Launch a sub-agent to handle complex, multi-step tasks. "
         "Each agent type has specific capabilities and tools available to it.\n\n"
@@ -98,12 +94,7 @@ AGENT_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
-    """Build tool name list for the sub-agent.
-
-    Resolution order (mirrors Claude Code's tool resolution):
-      1. Start with allowed_tools whitelist (or all tools if None)
-      2. Subtract disallowed_tools blacklist
-    """
+    """Build tool name list for the sub-agent."""
     from src.tools import registry as tool_registry
 
     if agent_def.allowed_tools is not None:
@@ -112,7 +103,6 @@ def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
     else:
         tools = tool_registry.list_names()
 
-    # Apply disallowed_tools blacklist
     if agent_def.disallowed_tools:
         blacklist = set(agent_def.disallowed_tools)
         tools = [t for t in tools if t not in blacklist]
@@ -120,45 +110,54 @@ def _resolve_tools(agent_def: AgentDefinition) -> list[str]:
     return tools
 
 
-def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
+async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
     """Launch a sub-agent to execute the given prompt."""
     prompt = inputs.get("prompt", "").strip()
     description = inputs.get("description", "").strip()
     agent_type = inputs.get("agent_type", "").strip()
 
     if not prompt:
-        return AsyncGenWithResult.of_value(
-            ToolResult(data={"success": False, "error": "No prompt provided"})
-        )
+        return ToolResult(data={"success": False, "error": "No prompt provided"})
 
     # --- Resolve agent definition ---
     if agent_type:
         agent_def = get_agent(agent_type)
         if agent_def is None:
             available = ", ".join(a.name for a in list_agents())
-            return AsyncGenWithResult.of_value(ToolResult(data={
+            return ToolResult(data={
                 "success": False,
                 "error": (
                     f"Unknown agent type: '{agent_type}'. "
                     f"Available: {available}, general-purpose"
                 ),
-            }))
+            })
     else:
         agent_def = _DEFAULT_AGENT
 
     # --- Depth check ---
     if context.depth >= config.MAX_AGENT_DEPTH:
-        return AsyncGenWithResult.of_value(ToolResult(data={
+        return ToolResult(data={
             "success": False,
             "agent_name": agent_def.name,
             "error": (
                 f"Maximum agent nesting depth ({config.MAX_AGENT_DEPTH}) reached. "
                 f"Cannot launch agent '{agent_def.name}' at depth {context.depth}."
             ),
-        }))
+        })
 
     # --- Build tool name list ---
     sub_tool_names = _resolve_tools(agent_def)
+
+    # --- Build system prompt with restriction notice ---
+    system_prompt = agent_def.system_prompt
+    if agent_def.disallowed_tools:
+        restricted = ", ".join(agent_def.disallowed_tools)
+        system_prompt += (
+            f"\n\nIMPORTANT: The following tools are restricted and unavailable "
+            f"to you: {restricted}. If completing the task requires any of these "
+            f"tools, explicitly report that you cannot complete the task due to "
+            f"insufficient tool permissions, and list which tools are needed."
+        )
 
     # --- Build initial messages + history ---
     initial_messages: list[Message] = [
@@ -192,41 +191,37 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
         permissions=context.permissions.as_silent() if context.permissions else None,
+        on_event=context.on_event,
     )
 
     # --- Sub-agent state ---
     sub_state = AgentState(agent_id=f"agent:{agent_def.name}")
     label = f"agent:{agent_def.name}"
+    on_event = context.on_event
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator:
-        try:
-            from src.agent_loop import run_agent_loop  # local import to avoid circular
+    try:
+        from src.agent_loop import run_agent_loop
 
-            gen = run_agent_loop(
-                system_prompt=agent_def.system_prompt,
-                tool_use_context=sub_context,
-                max_turns=agent_def.max_turns,
-                state=sub_state,
-                label=label,
-            )
-            async for ev in gen.events():
-                yield ev
-            result_text = gen.result
-        except Exception as e:
-            run.set_result(ToolResult(data={
-                "success": False,
-                "agent_name": agent_def.name,
-                "error": f"Agent execution failed: {e}",
-            }))
-            return
-
-        run.set_result(ToolResult(data={
-            "success": True,
+        result_text = await run_agent_loop(
+            system_prompt=system_prompt,
+            tool_use_context=sub_context,
+            max_turns=agent_def.max_turns,
+            state=sub_state,
+            label=label,
+            on_event=on_event,
+        )
+    except Exception as e:
+        return ToolResult(data={
+            "success": False,
             "agent_name": agent_def.name,
-            "result": result_text,
-        }))
+            "error": f"Agent execution failed: {e}",
+        })
 
-    return AsyncGenWithResult(_impl)
+    return ToolResult(data={
+        "success": True,
+        "agent_name": agent_def.name,
+        "result": result_text,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +229,6 @@ def _execute(inputs: dict, context: ToolUseContext) -> AsyncGenWithResult:
 # ---------------------------------------------------------------------------
 
 def _map_result(data: dict) -> str:
-    """Convert executor data to LLM-readable text."""
     if not data.get("success"):
         return f"Error: {data.get('error', 'Unknown error')}"
 

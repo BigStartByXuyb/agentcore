@@ -22,6 +22,7 @@ Search order (later overrides earlier):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +42,38 @@ class McpServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     scope: str = "project"  # "global" | "project"
+
+
+def config_hash(cfg: McpServerConfig) -> str:
+    """SHA-256 前 16 位 hex，排除 scope。"""
+    blob = json.dumps({
+        "name": cfg.name, "type": cfg.type, "url": cfg.url,
+        "command": cfg.command, "args": cfg.args, "env": cfg.env,
+    }, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def get_mcp_config_paths(
+    *,
+    project_dir: str | Path | None = None,
+    global_dir: str | Path | None = None,
+) -> list[tuple[Path, str]]:
+    """Return MCP config file paths with scope (may or may not exist on disk).
+
+    Returns [(path, scope), ...] — order is global first, project second.
+    """
+    if global_dir is None:
+        global_dir = Path.home() / ".my-agent"
+    else:
+        global_dir = Path(global_dir)
+    if project_dir is None:
+        project_dir = Path.cwd()
+    else:
+        project_dir = Path(project_dir)
+    return [
+        (global_dir / "mcp.json", "global"),
+        (project_dir / ".mcp.json", "project"),
+    ]
 
 
 def _expand_env_vars(env: dict[str, str]) -> dict[str, str]:
@@ -121,32 +154,16 @@ def load_mcp_configs(
     Returns deduplicated list — project configs override global
     configs with the same server name.
     """
-    if global_dir is None:
-        global_dir = Path.home() / ".my-agent"
-    else:
-        global_dir = Path(global_dir)
+    config_paths = get_mcp_config_paths(
+        project_dir=project_dir, global_dir=global_dir)
 
-    if project_dir is None:
-        project_dir = Path.cwd()
-    else:
-        project_dir = Path(project_dir)
-
-    # Collect from both scopes
-    global_configs = _parse_mcp_file(global_dir / "mcp.json", scope="global")
-    project_configs = _parse_mcp_file(project_dir / ".mcp.json", scope="project")
-
-    # Deduplicate: project overrides global (by server name)
+    # Deduplicate: later scopes override earlier (project > global)
     by_name: dict[str, McpServerConfig] = {}
-
-    # Later ones override earlier ones, so global goes first, then project
-    for cfg in global_configs:
-        by_name[cfg.name] = cfg
-    for cfg in project_configs:
-        by_name[cfg.name] = cfg  # override
+    for path, scope in config_paths:
+        for cfg in _parse_mcp_file(path, scope=scope):
+            by_name[cfg.name] = cfg
 
     result = list(by_name.values())
-    logger.info(
-        "Loaded %d MCP server config(s) (%d global, %d project)",
-        len(result), len(global_configs), len(project_configs),
-    )
+    logger.info("Loaded %d MCP server config(s) from %d sources",
+                len(result), len(config_paths))
     return result

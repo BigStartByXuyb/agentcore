@@ -1,9 +1,8 @@
-"""Default terminal display handler for agent events (async).
+"""Default terminal display handler for agent events.
 
 Provides:
-  - default_handler()  — prints events to stdout
-  - consume_events()   — drains an AsyncGenWithResult, dispatches events,
-                         returns the final value
+  - default_handler()         — prints events to stdout
+  - make_interactive_handler() — wraps a base handler with permission-prompt logic
 """
 
 from __future__ import annotations
@@ -11,12 +10,13 @@ from __future__ import annotations
 import asyncio
 from typing import Callable
 
-from src.types import AsyncGenWithResult
+from src.types import EventCallback
 from src.events import (
     AgentEvent,
     TextDelta,
     TextBlock,
     ThinkingBlock,
+    ThinkingDelta,
     ToolStart,
     ToolEnd,
     ErrorEvent,
@@ -47,6 +47,11 @@ def default_handler(event: AgentEvent) -> None:
 
     elif isinstance(event, TextBlock):
         print(f"  [{label}:text] {event.text}")
+
+    elif isinstance(event, ThinkingDelta):
+        if event.first:
+            print(f"\n  [{label}:thinking] ", end="", flush=True)
+        print(event.delta, end="", flush=True)
 
     elif isinstance(event, ThinkingBlock):
         text = event.thinking
@@ -89,36 +94,38 @@ def default_handler(event: AgentEvent) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Event consumer
+# Interactive handler factory
 # ---------------------------------------------------------------------------
 
-async def consume_events(
-    gen: AsyncGenWithResult,
-    handler: Callable[[AgentEvent], None] | None = None,
+def make_interactive_handler(
+    base_handler: Callable[[AgentEvent], None],
     *,
     interactive: bool = True,
-):
-    """Drain an AsyncGenWithResult, dispatch events, return final value.
+) -> EventCallback:
+    """Wrap *base_handler* with permission-prompt logic.
 
-    PermissionRequest events are handled inline when interactive=True:
-    we prompt the user via asyncio.to_thread(input) and fill the Future
-    so the tool_runner can resume.
-
-    When interactive=False (background tasks), PermissionRequest is
-    auto-denied — no user prompt is possible.
+    For PermissionRequest events (interactive=True): schedule a user prompt
+    via asyncio.to_thread and resolve the Future so the tool runner resumes.
+    For all other events: delegate to *base_handler*.
     """
-    async for event in gen.events():
+
+    def handler(event: AgentEvent) -> None:
         if isinstance(event, PermissionRequest) and event.future is not None:
             if interactive:
                 summary = _summarize_input(event.tool_input)
                 prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
-                answer = await asyncio.to_thread(input, prompt)
-                event.future.set_result(answer.strip().lower())
+
+                async def _resolve() -> None:
+                    answer = await asyncio.to_thread(input, prompt)
+                    event.future.set_result(answer.strip().lower())
+
+                asyncio.create_task(_resolve())
             else:
                 event.future.set_result("n")
-        elif handler is not None:
-            handler(event)
-    return gen.result
+        else:
+            base_handler(event)
+
+    return handler
 
 
 # ---------------------------------------------------------------------------

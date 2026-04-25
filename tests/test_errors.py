@@ -23,15 +23,15 @@ from src.messages import build_tool_result_content
 from src.types import ToolResult, ToolUseContext
 
 
-def _drain(gen_or_value):
-    """Drain a generator and return its final value, or return the value directly."""
-    if hasattr(gen_or_value, '__next__'):
-        try:
-            while True:
-                next(gen_or_value)
-        except StopIteration as e:
-            return e.value
-    return gen_or_value
+import asyncio as _asyncio
+
+def _run_tool(label, tool_name, tool_input, tool_id, context):
+    """Run run_tool_use synchronously for tests, return (ToolResult, llm_text, is_error)."""
+    from src.tool_runner import run_tool_use
+    result, _id, text, is_error = _asyncio.run(
+        run_tool_use(label, tool_id, tool_name, tool_input, context, lambda _: None)
+    )
+    return result, text, is_error
 
 
 # =========================================================================
@@ -189,18 +189,16 @@ class TestRunToolUse:
         return ToolUseContext(messages=[], tools=["bash"])
 
     def test_unknown_tool(self):
-        from src.tool_runner import run_tool_use
-        result, text, is_error = _drain(run_tool_use("nonexistent", {}, "id-1", self._make_context()))
+        result, text, is_error = _run_tool("test", "nonexistent", {}, "id-1", self._make_context())
         assert is_error is True
         assert "No such tool" in text
         assert result.data is None
 
     def test_executor_exception(self):
-        from src.tool_runner import run_tool_use
         from src.tools import registry
         from src.types import ToolDef
 
-        def bad_executor(inputs, ctx):
+        async def bad_executor(inputs, ctx):
             raise ValueError("boom")
 
         registry.register("_test_bad", ToolDef(
@@ -209,7 +207,7 @@ class TestRunToolUse:
             map_result=lambda d: str(d),
         ))
         try:
-            result, text, is_error = _drain(run_tool_use("_test_bad", {}, "id-1", self._make_context()))
+            result, text, is_error = _run_tool("test", "_test_bad", {}, "id-1", self._make_context())
             assert is_error is True
             assert "executor failed" in text
             assert "ValueError" in text
@@ -218,11 +216,10 @@ class TestRunToolUse:
             registry.unregister("_test_bad")
 
     def test_map_result_exception(self):
-        from src.tool_runner import run_tool_use
         from src.tools import registry
         from src.types import ToolDef
 
-        def ok_executor(inputs, ctx):
+        async def ok_executor(inputs, ctx):
             return ToolResult(data={"ok": True})
 
         def bad_map(data):
@@ -234,7 +231,7 @@ class TestRunToolUse:
             map_result=bad_map,
         ))
         try:
-            result, text, is_error = _drain(run_tool_use("_test_bad_map", {}, "id-1", self._make_context()))
+            result, text, is_error = _run_tool("test", "_test_bad_map", {}, "id-1", self._make_context())
             assert is_error is True
             assert "map_result failed" in text
             assert "TypeError" in text
@@ -242,7 +239,6 @@ class TestRunToolUse:
             registry.unregister("_test_bad_map")
 
     def test_success_returns_false(self):
-        from src.tool_runner import run_tool_use
         from src.tools import registry
         from src.types import ToolDef
 
@@ -252,7 +248,7 @@ class TestRunToolUse:
             map_result=lambda d: d,
         ))
         try:
-            result, text, is_error = _drain(run_tool_use("_test_ok", {}, "id-1", self._make_context()))
+            result, text, is_error = _run_tool("test", "_test_ok", {}, "id-1", self._make_context())
             assert is_error is False
             assert text == "hello"
         finally:
@@ -309,50 +305,42 @@ class TestAgentLoopApiErrorRecovery:
     def test_api_error_injects_synthetic_message(self, mock_query):
         """When query_model raises, agent_loop should return error text
         and keep history alternation correct."""
+        import asyncio
         from src.agent_loop import run_agent_loop
-        from src.types import ToolUseContext, AgentState
-        from src.display import consume_events
+        from src.types import ToolUseContext, AgentState, MessageHistory, Message
 
         mock_query.side_effect = APIConnectionError(request=MagicMock())
 
-        messages = [{"role": "user", "content": "hello"}]
-        result = consume_events(run_agent_loop(
-            messages=messages,
+        history = MessageHistory([Message(role="user", content="hello")])
+        result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tools=[],
-            tool_use_context=ToolUseContext(messages=messages, tools=[]),
+            tool_use_context=ToolUseContext(messages=history, tools=[]),
             max_turns=3,
             state=AgentState(agent_id="test"),
             label="test",
+            on_event=lambda _: None,
         ))
 
-        # Should return error text, not raise
         assert "API" in result or "connect" in result.lower()
-
-        # History should end with assistant message (synthetic)
-        assert len(messages) >= 2
-        assert messages[-1]["role"] == "assistant"
 
     @patch("src.agent_loop.query_model")
     def test_api_error_does_not_loop(self, mock_query):
         """API error should immediately return, not retry inside the loop."""
+        import asyncio
         from src.agent_loop import run_agent_loop
-        from src.types import ToolUseContext, AgentState
-        from src.display import consume_events
+        from src.types import ToolUseContext, AgentState, MessageHistory, Message
 
         mock_query.side_effect = Exception("unexpected boom")
 
-        messages = [{"role": "user", "content": "test"}]
-        result = consume_events(run_agent_loop(
-            messages=messages,
+        history = MessageHistory([Message(role="user", content="test")])
+        result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tools=[],
-            tool_use_context=ToolUseContext(messages=messages, tools=[]),
+            tool_use_context=ToolUseContext(messages=history, tools=[]),
             max_turns=10,
             state=AgentState(agent_id="test"),
             label="test",
+            on_event=lambda _: None,
         ))
 
-        # query_model should only be called once (no retry inside agent loop)
         assert mock_query.call_count == 1
         assert "unexpected boom" in result

@@ -1,4 +1,4 @@
-"""Background memory extraction — runs after each turn (async).
+"""Background memory extraction — runs after each turn (async, callback-based).
 
 Corresponds to Claude Code's src/services/extractMemories/extractMemories.ts.
 
@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import AsyncIterator
 
 from src import config
 from src.types import (
-    AgentState, AsyncGenWithResult, Message, MessageHistory,
+    AgentState, EventCallback, Message, MessageHistory,
     ToolResult, ToolDef, TextContent, ToolUseContent, ToolUseContext,
 )
-from src.events import AgentEvent
 from src.memory.paths import get_memory_dir, get_memory_dir_display, ensure_memory_dir
 from src.memory.scan import scan_memory_files, format_memory_manifest
 
@@ -110,23 +108,24 @@ Then update MEMORY.md index with a one-line pointer:
 """
 
 
-def run_memory_extraction(
+async def run_memory_extraction(
     messages: list[Message],
     memory_dir: str | None = None,
     since_index: int = 0,
-) -> AsyncGenWithResult[AgentEvent, None]:
-    """Extract memories from conversation, yielding events silently."""
+    on_event: EventCallback | None = None,
+) -> None:
+    """Extract memories from conversation, emitting events via on_event."""
     if not config.MEMORY_ENABLED:
-        return AsyncGenWithResult.of_value(None)
+        return
 
     mem_dir = memory_dir or get_memory_dir()
 
     if len(messages) < _MIN_MESSAGES:
-        return AsyncGenWithResult.of_value(None)
+        return
 
     if _has_memory_writes(messages, mem_dir, since_index):
         logger.debug("Skipping extraction: main agent already wrote to memory")
-        return AsyncGenWithResult.of_value(None)
+        return
 
     ensure_memory_dir()
 
@@ -153,33 +152,30 @@ def run_memory_extraction(
     extraction_history = MessageHistory(extraction_messages)
     restricted_write = _make_restricted_write_file(mem_dir)
 
+    cb = on_event or (lambda _: None)
+
     tool_use_context = ToolUseContext(
         messages=extraction_history,
         tools=["read_file", "write_file"],
         depth=1,
         tool_overrides={"write_file": restricted_write},
+        on_event=cb,
     )
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
+    try:
         from src.agent_loop import run_agent_loop
 
-        gen = run_agent_loop(
+        await run_agent_loop(
             system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=5,
             state=AgentState(agent_id="memory-extraction"),
             label="memory-extraction",
             stream=False,
+            on_event=cb,
         )
-        try:
-            async for ev in gen.events():
-                yield ev
-            run.set_result(None)
-        except Exception as e:
-            logger.debug("Memory extraction failed (non-critical): %s", e)
-            run.set_result(None)
-
-    return AsyncGenWithResult(_impl)
+    except Exception as e:
+        logger.debug("Memory extraction failed (non-critical): %s", e)
 
 
 def _has_memory_writes(messages: list[Message], memory_dir: str, since_index: int = 0) -> bool:

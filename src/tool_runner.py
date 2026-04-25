@@ -1,18 +1,13 @@
-"""Unified tool execution entry point (async).
+"""Unified tool execution entry point (async, callback-based).
 
 Corresponds to Claude Code's toolExecution.ts runToolUse() — the single
 place where executor() and map_result() are called, wrapped in try/catch
 so tool failures never crash the agent loop.
 
-Supports two executor shapes:
-  - async def executor(...) -> ToolResult   (bash, read_file, grep)
-      Returns a coroutine.  Runner awaits it.
-  - def executor(...) -> AsyncGenWithResult (agent, fork skill)
-      Returns an AsyncGenWithResult.  Runner iterates .events() then
-      reads .result.
+All tool executors are now `async def executor(inputs, ctx) -> ToolResult`.
+Tools that need to emit events use `ctx.on_event` callback.
 
-run_tool_use() itself returns an AsyncGenWithResult so the caller can
-iterate sub-agent events AND recover the terminal (ToolResult, str, bool).
+Event output uses the `on_event` callback pattern instead of generators.
 """
 
 from __future__ import annotations
@@ -20,11 +15,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from typing import AsyncIterator
+from dataclasses import dataclass, replace
 
-from src.types import AsyncGenWithResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
+from src.types import EventCallback, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import registry as tool_registry
-from src.events import AgentEvent
 from src.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
 
 logger = logging.getLogger(__name__)
@@ -44,147 +38,268 @@ def merge_tool_call(id:str, tool_name: str, tool_input: dict, groups: list[ToolC
         groups.append(ToolCallGroup(tool_call=[ToolCall(id=id, name=tool_name, input=tool_input)], type=call_type))
 
 
-def run_tool_use(
-    label:str,
-    id:str,
+async def run_tool_use(
+    label: str,
+    id: str,
     tool_name: str,
     tool_input: dict,
     context: ToolUseContext,
-) -> AsyncGenWithResult[AgentEvent, ToolUseReturn]:
-    """Execute a single tool, yielding events and producing a result.
+    on_event: EventCallback,
+) -> ToolUseReturn:
+    """Execute a single tool, emitting events via on_event callback.
 
-    Returns an AsyncGenWithResult that:
-      - yields AgentEvent objects from generator-based executors
-      - sets .result to (ToolResult, llm_text, is_error)
+    Returns (ToolResult, tool_use_id, llm_text, is_error).
     """
     if tool_name not in tool_registry.list_names():
-        return AsyncGenWithResult.of_value(
-            (ToolResult(data=None), f"No such tool: '{tool_name}'", True)
-        )
+        return (ToolResult(data=None), id, f"No such tool: '{tool_name}'", True)
 
     if context.tool_overrides and tool_name in context.tool_overrides:
         tool = context.tool_overrides[tool_name]
     elif tool_name not in context.tools:
-        return AsyncGenWithResult.of_value(
-            (ToolResult(data=None), f"Tool '{tool_name}' is not available in current context", True)
-        )
+        return (ToolResult(data=None), id, f"Tool '{tool_name}' is not available in current context", True)
     else:
         resolved = tool_registry.get(tool_name)
         assert resolved is not None
         tool = resolved
 
-    _tool = tool
+    try:
+        on_event(ToolStart(label=label, tool_name=tool_name, tool_input=tool_input))
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
-        try:
-            yield ToolStart(label=label, tool_name=tool_name, tool_input=tool_input)
+        # --- Permission check ---
+        if context.permissions is not None:
+            content = _extract_content(tool_name, tool_input)
+            decision = context.permissions.check(tool_name, content)
 
-            # --- Permission check ---
-            if context.permissions is not None:
-                content = _extract_content(tool_name, tool_input)
-                decision = context.permissions.check(tool_name, content)
+            if decision.behavior == "deny":
+                msg = decision.message or "Permission denied,You do not have permission to access this path[{content}]."
+                on_event(PermissionDenied(label=label, tool_name=tool_name, message=msg))
+                on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=msg))
+                return (ToolResult(data=None), id, msg, True)
 
-                if decision.behavior == "deny":
-                    msg = decision.message or "Permission denied,You do not have permission to access this path[{content}]."
-                    yield PermissionDenied(label=label, tool_name=tool_name, message=msg)
-                    run.set_result((ToolResult(data=None), id, msg, True))
-                    yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=msg)
-                    return
+            if decision.behavior == "ask":
+                future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+                on_event(PermissionRequest(
+                    label=label, tool_name=tool_name, tool_input=tool_input, future=future,
+                ))
+                answer = await future
+                if answer in ("y", "yes"):
+                    pass
+                elif answer == "always":
+                    from src.permissions import PermissionRule
+                    context.permissions.add_session_rule(PermissionRule(
+                        tool_name=tool_name,
+                        content_pattern=content,
+                        behavior="allow",
+                        source="session",
+                    ))
+                else:
+                    deny_msg = "User denied permission,You do not have permission to access this path[{content}]."
+                    on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg))
+                    return (ToolResult(data=None), id, deny_msg, True)
 
-                if decision.behavior == "ask":
-                    future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-                    yield PermissionRequest(
-                        label=label, tool_name=tool_name, tool_input=tool_input, future=future,
-                    )
-                    answer = await future
-                    if answer in ("y", "yes"):
-                        pass
-                    elif answer == "always":
-                        from src.permissions import PermissionRule
-                        context.permissions.add_session_rule(PermissionRule(
-                            tool_name=tool_name,
-                            content_pattern=content,
-                            behavior="allow",
-                            source="session",
-                        ))
-                    else:
-                        deny_msg = "User denied permission,You do not have permission to access this path[{content}]."
-                        run.set_result((ToolResult(data=None), id, deny_msg, True))
-                        yield ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg)
-                        return
+        ctx_with_event = replace(context, on_event=on_event)
+        ret = tool.executor(tool_input, ctx_with_event)
 
-            ret = _tool.executor(tool_input, context)
+        if asyncio.iscoroutine(ret) or inspect.isawaitable(ret):
+            result = await ret
+        else:
+            result = ret
 
-            if isinstance(ret, AsyncGenWithResult):
-                async for ev in ret.events():
-                    yield ev
-                result = ret.result
-            elif asyncio.iscoroutine(ret) or inspect.isawaitable(ret):
-                result = await ret
-            else:
-                result = ret
+    except Exception as e:
+        error_text = f"Tool '{tool_name}' executor failed: {type(e).__name__}: {e}"
+        logger.error(error_text, exc_info=True)
+        on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=error_text))
+        return (ToolResult(data=None), id, error_text, True)
 
-        except Exception as e:
-            error_text = f"Tool '{tool_name}' executor failed: {type(e).__name__}: {e}"
-            logger.error(error_text, exc_info=True)
-            run.set_result((ToolResult(data=None), id, error_text, True))
-            yield ToolEnd(label=label,is_error=True, tool_name=tool_name, result_summary=error_text)
-            return
+    try:
+        llm_text = tool.map_result(result.data)
+    except Exception as e:
+        error_text = f"Tool '{tool_name}' map_result failed: {type(e).__name__}: {e}"
+        logger.error(error_text, exc_info=True)
+        on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=error_text))
+        return (ToolResult(data=None), id, error_text, True)
 
-        try:
-            llm_text = _tool.map_result(result.data)
-        except Exception as e:
-            error_text = f"Tool '{tool_name}' map_result failed: {type(e).__name__}: {e}"
-            logger.error(error_text, exc_info=True)
-            run.set_result((ToolResult(data=None), id, error_text, True))
-            yield ToolEnd(label=label,is_error=True, tool_name=tool_name, result_summary=error_text)
-            return
-        yield ToolEnd(label=label,is_error=False, tool_name=tool_name, result_summary=llm_text)
-        run.set_result((result, id, llm_text, False))
-
-    return AsyncGenWithResult(_impl)
+    on_event(ToolEnd(label=label, is_error=False, tool_name=tool_name, result_summary=llm_text))
+    return (result, id, llm_text, False)
 
 
-def execute_tool_groups(
-    label:str,
+async def execute_tool_groups(
+    label: str,
     groups: list[ToolCallGroup],
     context: ToolUseContext,
-) -> AsyncGenWithResult[AgentEvent, list[ToolUseReturn]]:
+    on_event: EventCallback,
+) -> list[ToolUseReturn]:
     """Batch execute tool groups with concurrency control.
 
-    - read-only groups: concurrent via asyncio.gather, events replayed after completion
-    - read-write groups: sequential with real-time event bubbling
+    - read-only groups: concurrent via asyncio.gather (events may interleave)
+    - read-write groups: sequential with direct on_event calls
+    """
+    all_results: list[ToolUseReturn] = []
+
+    for group in groups:
+        if group.type == "read-only" and len(group.tool_call) > 1:
+            # Concurrent execution — pass on_event directly, output may interleave.
+            tasks = [
+                run_tool_use(label, c.id, c.name, c.input, context, on_event)
+                for c in group.tool_call
+            ]
+            results = await asyncio.gather(*tasks)
+            all_results.extend(results)
+
+            # --- Ordered output version (Queue buffering) ---
+            # If ordered output is needed, uncomment below and comment out the gather above.
+            #
+            # _SENTINEL = object()
+            # queues: list[asyncio.Queue] = []
+            # results: list[ToolUseReturn] = [None] * len(group.tool_call)  # type: ignore
+            #
+            # async def _produce(idx: int, call: ToolCall, q: asyncio.Queue) -> None:
+            #     def _task_on_event(ev):
+            #         q.put_nowait(ev)
+            #     r = await run_tool_use(label, call.id, call.name, call.input, context, _task_on_event)
+            #     results[idx] = r
+            #     await q.put(_SENTINEL)
+            #
+            # for i, c in enumerate(group.tool_call):
+            #     q: asyncio.Queue = asyncio.Queue()
+            #     queues.append(q)
+            #     asyncio.create_task(_produce(i, c, q))
+            #
+            # for i, q in enumerate(queues):
+            #     while True:
+            #         ev = await q.get()
+            #         if ev is _SENTINEL:
+            #             break
+            #         on_event(ev)
+            #     all_results.append(results[i])
+        else:
+            for call in group.tool_call:
+                r = await run_tool_use(label, call.id, call.name, call.input, context, on_event)
+                all_results.append(r)
+
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# StreamingToolExecutor — execute tools as they stream in
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _TrackedTool:
+    id: str
+    name: str
+    input: dict
+    is_concurrent_safe: bool
+    status: str  # "queued" | "executing" | "completed"
+    task: asyncio.Task | None = None
+    result: ToolUseReturn | None = None
+
+
+class StreamingToolExecutor:
+    """Execute tools as they arrive during API streaming.
+
+    - Concurrent-safe tools (read-only) run in parallel as independent tasks
+    - Non-concurrent tools queue behind all preceding tools
+    - Events are emitted directly via on_event (may interleave for concurrent tools)
     """
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
-        all_results: list[ToolUseReturn] = []
+    def __init__(self, label: str, context: ToolUseContext, on_event: EventCallback) -> None:
+        self._label = label
+        self._context = context
+        self._on_event = on_event
+        self._tools: list[_TrackedTool] = []
 
-        for group in groups:
-            if group.type == "read-only" and len(group.tool_call) > 1:
-                async def _drain(call: ToolCall) -> tuple[ToolUseReturn, list[AgentEvent]]:
-                    r = run_tool_use(label, call.id, call.name, call.input, context)
-                    events: list[AgentEvent] = []
-                    async for ev in r.events():
-                        events.append(ev)
-                    return r.result, events
-
-                gathered = await asyncio.gather(
-                    *[_drain(c) for c in group.tool_call]
+    def add_tool(self, block) -> None:
+        tool_def = tool_registry.get(block.name)
+        is_safe = False
+        if tool_def is not None:
+            try:
+                is_safe = tool_def.is_read_only(
+                    block.input if isinstance(block.input, dict) else {}
                 )
-                for result, events in gathered:
-                    for ev in events:
-                        yield ev
-                    all_results.append(result)
-            else:
-                for call in group.tool_call:
-                    r = run_tool_use(label, call.id, call.name, call.input, context)
-                    async for ev in r.events():
-                        yield ev
-                    all_results.append(r.result)
+            except Exception:
+                is_safe = False
 
-        run.set_result(all_results)
+        tracked = _TrackedTool(
+            id=block.id,
+            name=block.name,
+            input=block.input if isinstance(block.input, dict) else {},
+            is_concurrent_safe=is_safe,
+            status="queued",
+        )
+        self._tools.append(tracked)
+        self._maybe_start()
 
-    return AsyncGenWithResult(_impl)
+    def has_tools(self) -> bool:
+        return len(self._tools) > 0
+
+    def _maybe_start(self) -> None:
+        for tracked in self._tools:
+            if tracked.status != "queued":
+                continue
+
+            executing = [t for t in self._tools if t.status == "executing"]
+            can_run = (
+                len(executing) == 0
+                or (tracked.is_concurrent_safe and all(t.is_concurrent_safe for t in executing))
+            )
+
+            if can_run:
+                tracked.status = "executing"
+                tracked.task = asyncio.create_task(self._run_one(tracked))
+            elif not tracked.is_concurrent_safe:
+                break
+
+    async def _run_one(self, tracked: _TrackedTool) -> None:
+        try:
+            result = await run_tool_use(
+                self._label, tracked.id, tracked.name, tracked.input,
+                self._context, self._on_event,
+            )
+            tracked.result = result
+        finally:
+            tracked.status = "completed"
+            self._maybe_start()
+
+    async def drain_completed(self) -> None:
+        """No-op: events are emitted directly via on_event during execution."""
+        pass
+
+        # --- Ordered output version (Queue buffering) ---
+        # If ordered output is needed, add event_queue/drained fields to _TrackedTool,
+        # wrap on_event with q.put_nowait in _run_one, then uncomment:
+        #
+        # for tracked in self._tools:
+        #     if tracked.drained:
+        #         continue
+        #     while not tracked.event_queue.empty():
+        #         ev = tracked.event_queue.get_nowait()
+        #         if ev is _SENTINEL:
+        #             tracked.drained = True
+        #             break
+        #         self._on_event(ev)
+        #     if not tracked.drained and tracked.status == "executing":
+        #         break
+
+    async def drain_remaining(self) -> None:
+        """Wait for all executing tools to complete."""
+        for tracked in self._tools:
+            if tracked.task is not None and tracked.status == "executing":
+                await tracked.task
+
+        # --- Ordered output version (Queue buffering) ---
+        # for tracked in self._tools:
+        #     if tracked.drained:
+        #         continue
+        #     while True:
+        #         ev = await tracked.event_queue.get()
+        #         if ev is _SENTINEL:
+        #             tracked.drained = True
+        #             break
+        #         self._on_event(ev)
+
+    def collect_results(self) -> list[ToolUseReturn]:
+        return [t.result for t in self._tools if t.result is not None]
 
 
 # ---------------------------------------------------------------------------

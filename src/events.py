@@ -43,8 +43,15 @@ class TextBlock(AgentEvent):
 
 @dataclass
 class ThinkingBlock(AgentEvent):
-    """Extended thinking content from the model."""
+    """Complete thinking block (non-streaming path)."""
     thinking: str
+
+
+@dataclass
+class ThinkingDelta(AgentEvent):
+    """Streaming thinking increment (one chunk from the stream)."""
+    delta: str
+    first: bool = False
 
 
 # ---------------------------------------------------------------------------

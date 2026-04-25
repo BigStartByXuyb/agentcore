@@ -30,7 +30,7 @@ from src.agent_loop import (
     _clean_thinking_history,
     run_agent_loop,
 )
-from src.display import consume_events, default_handler
+from src.display import default_handler
 from src.events import ThinkingBlock
 
 
@@ -347,40 +347,41 @@ class TestThinkingRecovery:
 
         mock_query.side_effect = [err, success_response]
 
-        messages = [{"role": "user", "content": "test"}]
-        ctx = ToolUseContext(messages=messages, tools=["bash"])
+        import asyncio
+        from src.types import MessageHistory, Message
 
-        result = consume_events(run_agent_loop(
-            messages=messages,
+        history = MessageHistory([Message(role="user", content="test")])
+        ctx = ToolUseContext(messages=history, tools=["bash"])
+
+        result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tools=[],
             tool_use_context=ctx,
             max_turns=3,
             thinking={"type": "enabled", "budget_tokens": 5000},
+            on_event=lambda _: None,
         ))
         assert result == "recovered"
         assert mock_query.call_count == 2
 
     @patch("src.agent_loop.query_model")
     def test_non_thinking_400_not_recovered(self, mock_query):
+        import asyncio
         from anthropic import APIError
-        from src.types import ToolUseContext
+        from src.types import ToolUseContext, MessageHistory, Message
 
         err = APIError(message="malformed request", request=MagicMock(), body=None)
         err.status_code = 400
 
         mock_query.side_effect = err
 
-        messages = [{"role": "user", "content": "test"}]
-        ctx = ToolUseContext(messages=messages, tools=["bash"])
+        history = MessageHistory([Message(role="user", content="test")])
+        ctx = ToolUseContext(messages=history, tools=["bash"])
 
-        result = consume_events(run_agent_loop(
-            messages=messages,
+        result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tools=[],
             tool_use_context=ctx,
             max_turns=3,
             thinking={"type": "enabled", "budget_tokens": 5000},
+            on_event=lambda _: None,
         ))
-        # Should return error text (not recovered)
         assert "400" in result.lower() or "bad request" in result.lower() or "error" in result.lower()

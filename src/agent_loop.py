@@ -1,17 +1,17 @@
-"""Agent loop — the main LLM ↔ tool execution cycle (async).
+"""Agent loop — the main LLM <-> tool execution cycle (async, callback-based).
 
 Provides two entry points:
 
   agent_loop()      — top-level REPL entry: manages MessageHistory, injects
                       skill reminders, delegates to run_agent_loop().
-  run_agent_loop()  — low-level async generator wrapper: takes raw messages +
-                      config, runs the LLM ↔ tool cycle, yields AgentEvent
-                      objects, and stores final text in .result.
+  run_agent_loop()  — low-level async function: takes raw messages + config,
+                      runs the LLM <-> tool cycle, emits AgentEvent via
+                      on_event callback, returns final text.
 
 Corresponds to Claude Code's:
-  - src/query.ts            → queryLoop() (async generator yielding Messages)
-  - src/services/tools/     → tool execution within the loop
-  - src/utils/forkedAgent.ts → sub-agent loop reuse
+  - src/query.ts            -> queryLoop()
+  - src/services/tools/     -> tool execution within the loop
+  - src/utils/forkedAgent.ts -> sub-agent loop reuse
 """
 
 from __future__ import annotations
@@ -19,30 +19,32 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from typing import AsyncIterator, Callable
+from typing import Callable
 
 import anthropic.types
 
 from src import config
 from src.types import (
-    AgentState, Attachment, AsyncGenWithResult, ContentBlock, Message, MessageHistory,
+    AgentState, Attachment, ContentBlock, EventCallback, Message, MessageHistory,
     TextContent, ThinkingContent, RedactedThinkingContent, ToolResultContent, ToolUseContent,
     ToolUseContext, ToolCallGroup,
 )
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
-from src.tool_runner import merge_tool_call,execute_tool_groups
+from src.tool_runner import merge_tool_call, execute_tool_groups, StreamingToolExecutor
 from src.tools import registry as tool_registry
 from src.api import query_model, create_stream_with_retry
 from src.errors import create_assistant_error_message
 from src.events import (
-    AgentEvent, TextDelta, TextBlock, ThinkingBlock,
+    AgentEvent, TextDelta, TextBlock, ThinkingBlock, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
 )
-from src.display import consume_events, default_handler
+from src.display import make_interactive_handler, default_handler
 from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
+from src.compact.micro_compact import should_micro_compact, micro_compact
+from src.compact.auto_compact import should_auto_compact, auto_compact, estimate_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -50,36 +52,8 @@ logger = logging.getLogger(__name__)
 # Low-level agent loop — shared by top-level REPL and sub-agents
 # ---------------------------------------------------------------------------
 
-""""
-such of imp twice write:
-def test_func()->Callable[[RESULT],AsyncIterator[int]]:
 
-    async def imp(result:RESULT)->AsyncIterator[int]:
-        yield 1
-        result.result = 1
-
-    return imp
-    
-class RESULT:
-    result:int
-
-class test:
-    def __init__(self, result:RESULT, test1:Callable[[RESULT],]):
-        self.result = result
-        self.test1 = test1
-
-    async def run(self):
-        async for i in self.test1(self.result):
-            print(i)
-
-async def run_test():
-    test1 = test_func()
-    result:RESULT = RESULT()
-    runtest = test(result=result, test1=test1)
-    await runtest.run()
-"""""
-
-def run_agent_loop(
+async def run_agent_loop(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
     system_prompt: str,
@@ -89,171 +63,159 @@ def run_agent_loop(
     label: str = "main",
     stream: bool = False,
     thinking: dict | None = None,
-) -> AsyncGenWithResult[AgentEvent, str]:
-    """Run the core LLM ↔ tool execution cycle.
+    on_event: EventCallback,
+) -> str:
+    """Run the core LLM <-> tool execution cycle.
 
-    Returns an AsyncGenWithResult that yields AgentEvent objects for
-    display and stores the final text in .result.
-
-    Tools are derived from tool_use_context.tools (the single source of
-    truth), matching Claude Code's pattern where tools live exclusively
-    in toolUseContext.options.tools.
+    Emits AgentEvent objects via on_event callback.
+    Returns the final assistant text.
     """
     _state = state or AgentState(agent_id=label)
     history = tool_use_context.messages
+    _msg_count_at_usage = len(history)
 
-    async def _impl(run: AsyncGenWithResult) -> AsyncIterator[AgentEvent]:
-        nonlocal tool_use_context, memory_task
+    pending_retry_events: list[RetryNotice] = []
 
-        pending_retry_events: list[RetryNotice] = []
+    def _on_retry(delay: float, attempt: int, max_attempts: int) -> None:
+        pending_retry_events.append(
+            RetryNotice(label=label, delay=delay, attempt=attempt, max_attempts=max_attempts)
+        )
 
-        def _on_retry(delay: float, attempt: int, max_attempts: int) -> None:
-            pending_retry_events.append(
-                RetryNotice(label=label, delay=delay, attempt=attempt, max_attempts=max_attempts)
+    for _turn in range(max_turns):
+        if memory_task is not None and memory_task.done():
+            mem = memory_task.result()
+            memory_task = None
+            if mem is not None:
+                last_msg = tool_use_context.messages.last_user_message()
+                if last_msg is not None:
+                    last_msg.attach([mem])
+        # --- Micro Compact: clear old tool_result content before API call ---
+        if should_micro_compact(history.messages):
+            micro_compact(history.messages)
+
+        # --- Auto Compact: full LLM summarization if near context limit ---
+        if should_auto_compact(estimate_token_count(history, _state)):
+            await auto_compact(history)
+
+        tools = build_tool_schemas(
+            tool_registry,
+            allowed_tools=tool_use_context.tools,
+            tool_overrides=tool_use_context.tool_overrides,
+        )
+        pending_retry_events.clear()
+
+        # --- Call LLM ---
+        streaming_executor: StreamingToolExecutor | None = None
+
+        async def _call_llm():
+            nonlocal streaming_executor
+            if stream:
+                streaming_executor = StreamingToolExecutor(label, tool_use_context, on_event)
+                return await _stream_call(
+                    history, system_prompt, tools, thinking, _on_retry, label,
+                    tool_executor=streaming_executor, on_event=on_event,
+                )
+            return await query_model(
+                messages=history.normalized_for_api(),
+                system=system_prompt, tools=tools,
+                thinking=thinking, on_retry=_on_retry,
             )
 
-        for _turn in range(max_turns):
-            if memory_task is not None and memory_task.done():
-                mem = memory_task.result()
-                memory_task = None
-                if mem is not None:
-                    last_msg = tool_use_context.messages.last_user_message()
-                    if last_msg is not None:
-                        last_msg.attach([mem])
-            tools = build_tool_schemas(
-                tool_registry,
-                allowed_tools=tool_use_context.tools,
-                tool_overrides=tool_use_context.tool_overrides,
-            )
-            pending_retry_events.clear()
+        def _emit_error(err: Exception) -> None:
+            """Inject error into history and emit ErrorEvent."""
+            error_msg = create_assistant_error_message(err)
+            history.add_assistant(error_msg["content"])
+            on_event(ErrorEvent(label=label, error_text=error_msg["content"][0]["text"]))
 
-            # --- Call LLM ---
-            try:
+        try:
+            response = await _call_llm()
+        except Exception as api_error:
+            for ev in pending_retry_events:
+                on_event(ev)
 
-                if stream:
-                    stream_events: list = []
-                    response = await _stream_call(
-                        history, system_prompt, tools, thinking, _on_retry, label, stream_events,
-                    )
-                    for ev in stream_events:
-                        yield ev
-                else:
-                    response = await query_model(
-                        messages=history.normalized_for_api(),
-                        system=system_prompt,
-                        tools=tools,
-                        thinking=thinking,
-                        on_retry=_on_retry,
-                    )
-            except Exception as api_error:
-                for ev in pending_retry_events:
-                    yield ev
-
-                if _is_thinking_400(api_error) and thinking is not None:
-                    yield Recovery(label=label, message="Stripping thinking blocks and retrying...")
-                    _clean_thinking_history(history.messages)
-                    pending_retry_events.clear()
-                    try:
-                        if stream:
-                            stream_events = []
-                            response = await _stream_call(
-                                history, system_prompt, tools, thinking, _on_retry, label, stream_events,
-                            )
-                            for ev in stream_events:
-                                yield ev
-                        else:
-                            response = await query_model(
-                                messages=history.normalized_for_api(),
-                                system=system_prompt,
-                                tools=tools,
-                                thinking=thinking,
-                                on_retry=_on_retry,
-                            )
-                    except Exception as retry_error:
-                        for ev in pending_retry_events:
-                            yield ev
-                        error_msg = create_assistant_error_message(retry_error)
-                        history.add_assistant(error_msg["content"])
-                        error_text = error_msg["content"][0]["text"]
-                        yield ErrorEvent(label=label, error_text=error_text)
-                        run.set_result(error_text)
-                        continue
-                else:
-                    error_msg = create_assistant_error_message(api_error)
-                    history.add_assistant(error_msg["content"])
-                    error_text = error_msg["content"][0]["text"]
-                    yield ErrorEvent(label=label, error_text=error_text)
-                    run.set_result(error_text)
+            # Layer 3: reactive compact on prompt_too_long
+            if _is_prompt_too_long(api_error):
+                on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
+                if await auto_compact(history):
                     continue
 
-            for ev in pending_retry_events:
-                yield ev
+            if _is_thinking_400(api_error) and thinking is not None:
+                on_event(Recovery(label=label, message="Stripping thinking blocks and retrying..."))
+                _clean_thinking_history(history.messages)
+                pending_retry_events.clear()
+                try:
+                    response = await _call_llm()
+                except Exception as retry_error:
+                    for ev in pending_retry_events:
+                        on_event(ev)
+                    _emit_error(retry_error)
+                    continue
+            else:
+                _emit_error(api_error)
+                continue
 
-            # Track token usage
-            _state.total_input_tokens += response.usage.input_tokens
-            _state.total_output_tokens += response.usage.output_tokens
-            thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
-            _state.total_thinking_tokens += thinking_tokens
+        for ev in pending_retry_events:
+            on_event(ev)
 
-            # --- Step 1: yield thinking/text, collect tool_use into groups ---
-            tool_groups: list[ToolCallGroup] = []
-            for block in response.content:
-                if getattr(block, "type", None) == "thinking":
-                    text = getattr(block, "thinking", "") or ""
-                    if text:
-                        yield ThinkingBlock(label=label, thinking=text)
-                elif block.type == "text" and not stream:
-                    yield TextBlock(label=label, text=block.text)
-                elif block.type == "tool_use":
-                    merge_tool_call(id=block.id, tool_name=block.name,
-                                   tool_input=block.input, groups=tool_groups)
+        # Track token usage
+        _state.total_input_tokens += response.usage.input_tokens
+        _state.total_output_tokens += response.usage.output_tokens
+        thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        _state.total_thinking_tokens += thinking_tokens
+        # Record for hybrid token estimation (auto compact threshold)
+        cache_tokens = (
+            (getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
+            + (getattr(response.usage, "cache_read_input_tokens", 0) or 0)
+        )
+        _state.last_usage_tokens = response.usage.input_tokens + response.usage.output_tokens + cache_tokens
+        _state.messages_since_last_usage = 0
+        _msg_count_at_usage = len(history)
 
-            assistant_content = _serialize_content(response.content)
-            history.add_assistant(assistant_content)
+        assistant_content = _serialize_content(response.content)
+        history.add_assistant(assistant_content)
 
-            if not tool_groups:
-                yield TokenUsage(
-                    label=label,
-                    input_tokens=_state.total_input_tokens,
-                    output_tokens=_state.total_output_tokens,
-                    thinking_tokens=_state.total_thinking_tokens,
-                )
-                run.set_result(extract_text(response.content))
-                return
-
-            # --- Batch execute tools + collect results ---
-            group_run = execute_tool_groups(label, tool_groups, tool_use_context)
-            async for ev in group_run.events():
-                yield ev
-
-            tool_result_blocks: list[ToolResultContent] = []
-            all_new_messages: list[Message] = []
-            pending_context_modifier = None
-
-            for result, tool_id, llm_text, is_error in group_run.result:
-                tool_result_blocks.append(
-                    build_tool_result_content(tool_id, llm_text, is_error=is_error)
-                )
-                all_new_messages.extend(result.new_messages)
-                if result.context_modifier is not None:
-                    pending_context_modifier = result.context_modifier
-
-            _recover_orphan_tool_results(assistant_content, tool_result_blocks)
-            history.add_tool_results(tool_result_blocks)
-
-            if all_new_messages:
-                history.add_assistant_placeholder()
-                history.inject_messages(all_new_messages)
-
-            if pending_context_modifier is not None:
-                tool_use_context = pending_context_modifier(tool_use_context)
-
+        # --- Stream path: tools already executed by StreamingToolExecutor ---
+        if stream and streaming_executor is not None and streaming_executor.has_tools():
+            tool_use_context = _apply_tool_results(
+                streaming_executor.collect_results(),
+                assistant_content, history, tool_use_context,
+            )
             continue
 
-        run.set_result(f"[Agent loop '{label}' reached max turns ({max_turns})]")
+        # --- Non-stream path: emit thinking/text, collect tool_use into groups ---
+        tool_groups: list[ToolCallGroup] = []
+        for block in response.content:
+            if getattr(block, "type", None) == "thinking":
+                text = getattr(block, "thinking", "") or ""
+                if text:
+                    on_event(ThinkingBlock(label=label, thinking=text))
+            elif block.type == "text":
+                on_event(TextBlock(label=label, text=block.text))
+            elif block.type == "tool_use":
+                merge_tool_call(id=block.id, tool_name=block.name,
+                                tool_input=block.input, groups=tool_groups)
 
-    return AsyncGenWithResult(_impl)
+        if not tool_groups:
+            on_event(TokenUsage(
+                label=label,
+                input_tokens=_state.total_input_tokens,
+                output_tokens=_state.total_output_tokens,
+                thinking_tokens=_state.total_thinking_tokens,
+            ))
+            return extract_text(response.content)
 
+        # --- Batch execute tools + collect results ---
+        tool_results = await execute_tool_groups(label, tool_groups, tool_use_context, on_event)
+
+        tool_use_context = _apply_tool_results(
+            tool_results, assistant_content, history, tool_use_context,
+        )
+        # Track messages added since last API usage snapshot
+        # (assistant response + tool_results + any injected messages)
+        _state.messages_since_last_usage = len(history) - _msg_count_at_usage
+        continue
+
+    return f"[Agent loop '{label}' reached max turns ({max_turns})]"
 
 # ---------------------------------------------------------------------------
 # Top-level entry point — called from main.py REPL
@@ -300,7 +262,8 @@ async def agent_loop(
 
     turn_start_index = len(history)
 
-    gen = run_agent_loop(
+    handler = make_interactive_handler(default_handler)
+    result = await run_agent_loop(
         memory_task=memory_task,
         system_prompt=system,
         tool_use_context=tool_use_context,
@@ -309,8 +272,8 @@ async def agent_loop(
         label="main",
         stream=True,
         thinking=_build_thinking_param(),
+        on_event=handler,
     )
-    result = await consume_events(gen, default_handler)
 
     # Background memory extraction — fire-and-forget asyncio task
     from src.memory.extract import run_memory_extraction
@@ -319,10 +282,10 @@ async def agent_loop(
 
     async def _run_extraction():
         try:
-            extraction_gen = run_memory_extraction(
+            await run_memory_extraction(
                 messages_snapshot, get_memory_dir(), since_index=turn_start_index,
+                on_event=lambda _: None,
             )
-            await consume_events(extraction_gen, lambda _e: None, interactive=False)
         except Exception as e:
             logger.debug("Background memory extraction failed: %s", e)
 
@@ -332,7 +295,7 @@ async def agent_loop(
 
 
 # ---------------------------------------------------------------------------
-# Streaming helper — real-time text delta yielding
+# Streaming helper — real-time text delta emission
 # ---------------------------------------------------------------------------
 
 async def _stream_call(
@@ -342,13 +305,12 @@ async def _stream_call(
     thinking: dict | None,
     on_retry: Callable[[float, int, int], None] | None,
     label: str,
-    emit: list,
+    tool_executor: StreamingToolExecutor | None = None,
+    on_event: EventCallback = lambda _: None,
 ) -> anthropic.types.Message:
-    """Call the streaming API, collect TextDelta events, return final Message.
+    """Call the streaming API, emit events via on_event, optionally execute tools as they arrive.
 
-    TextDelta events are appended to `emit` (a list the caller drains
-    after awaiting this coroutine).  This avoids the problem of not
-    being able to yield from a sub-coroutine.
+    Returns the final API Message.
     """
     stream_cm = create_stream_with_retry(
         messages=history.normalized_for_api(),
@@ -357,11 +319,37 @@ async def _stream_call(
         thinking=thinking,
         on_retry=on_retry,
     )
+    _first_text = True
+    _first_thinking = True
+
+    '''
+    这个api_stream是一个异步生成器，里面会不断地产生事件（event），这些事件可能是文本块（text）、思考块（thinking）或者工具使用块（tool_use）。我们通过async for循环来迭代这些事件，并根据事件的类型进行不同的处理：
+    但是本质上这api stream内部重载了aitable和aiter方法，使得我们可以使用async for来迭代它，就像迭代一个异步生成器一样。
+    然后里面依然是用await feture来获取数据，同时注册到select网络监听器上，当数据准备好时就会被触发，继续往下执行。
+    这个select就和之前研究的一样，触发了io唤醒之后，就会按照表来set feture唤醒，并把原始数据一起set feture回来，然后解析然后继续往下走。
+    '''
     async with stream_cm as api_stream:
-        _first = True
-        async for text in api_stream.text_stream:
-            emit.append(TextDelta(label=label, delta=text, first=_first))
-            _first = False
+        async for event in api_stream:
+            if event.type == "text":
+                on_event(TextDelta(label=label, delta=event.text, first=_first_text))
+                _first_text = False
+
+            elif event.type == "thinking":
+                on_event(ThinkingDelta(label=label, delta=event.thinking, first=_first_thinking))
+                _first_thinking = False
+
+            elif event.type == "content_block_delta":
+                continue
+
+            elif event.type == "content_block_stop":
+                snapshot = api_stream.current_message_snapshot
+                block = snapshot.content[event.index]
+                if block.type == "tool_use" and tool_executor is not None:
+                    tool_executor.add_tool(block)
+                    await tool_executor.drain_completed()
+
+        if tool_executor is not None:
+            await tool_executor.drain_remaining()
         return await api_stream.get_final_message()
 
 
@@ -373,10 +361,7 @@ def _recover_orphan_tool_results(
     assistant_content: list[ContentBlock],
     tool_result_blocks: list[ToolResultContent],
 ) -> None:
-    """Ensure every tool_use in assistant_content has a matching tool_result.
-
-    Mutates tool_result_blocks in place.
-    """
+    """Ensure every tool_use in assistant_content has a matching tool_result."""
     expected_ids = {
         block.id
         for block in assistant_content
@@ -392,6 +377,37 @@ def _recover_orphan_tool_results(
             )
         )
 
+
+def _apply_tool_results(
+    tool_results: list,
+    assistant_content: list[ContentBlock],
+    history: MessageHistory,
+    tool_use_context: ToolUseContext,
+) -> ToolUseContext:
+    """Process tool execution results: build tool_result messages, inject into history."""
+    tool_result_blocks: list[ToolResultContent] = []
+    all_new_messages: list[Message] = []
+    pending_context_modifier = None
+
+    for result, tool_id, llm_text, is_error in tool_results:
+        tool_result_blocks.append(
+            build_tool_result_content(tool_id, llm_text, is_error=is_error)
+        )
+        all_new_messages.extend(result.new_messages)
+        if result.context_modifier is not None:
+            pending_context_modifier = result.context_modifier
+
+    _recover_orphan_tool_results(assistant_content, tool_result_blocks)
+    history.add_tool_results(tool_result_blocks)
+
+    if all_new_messages:
+        history.add_assistant_placeholder()
+        history.inject_messages(all_new_messages)
+
+    if pending_context_modifier is not None:
+        tool_use_context = pending_context_modifier(tool_use_context)
+
+    return tool_use_context
 
 
 def _serialize_content(content_blocks: list) -> list[ContentBlock]:
@@ -433,13 +449,22 @@ def _build_thinking_param() -> dict | None:
     return {"type": "enabled", "budget_tokens": budget}
 
 
-def _is_thinking_400(error: Exception) -> bool:
-    """Check if an API error is a thinking-related 400 that can be recovered.
+def _is_prompt_too_long(error: Exception) -> bool:
+    """Check if API error is a prompt-too-long error (400/413)."""
+    from anthropic import APIError as _APIError
+    if not isinstance(error, _APIError):
+        return False
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if status == 413:
+        return True
+    if status == 400:
+        msg = str(error).lower()
+        return "prompt is too long" in msg or "too many tokens" in msg
+    return False
 
-    Two known patterns:
-      - "invalid signature in thinking block"
-      - "thinking blocks cannot be modified"
-    """
+
+def _is_thinking_400(error: Exception) -> bool:
+    """Check if an API error is a thinking-related 400 that can be recovered."""
     from anthropic import APIError as _APIError
     if not isinstance(error, _APIError):
         return False
@@ -496,11 +521,7 @@ async def _read_memory_files(headers: list) -> list[str]:
 
 
 async def _prepare_memory_context(user_input: str, history: MessageHistory) -> Attachment|None:
-    """Select and read relevant memories (runs async, non-blocking).
-
-    Only handles recall — the MEMORY.md index is injected synchronously
-    by build_memory_index_reminder() in agent_loop().
-    """
+    """Select and read relevant memories (runs async, non-blocking)."""
     mem_dir = get_memory_dir()
 
     relevant_memories = await find_relevant_memories(user_input, mem_dir, history)
@@ -529,9 +550,10 @@ def _get_permission_engine():
     global _permission_engine
     if _permission_engine is None:
         from src.permissions import PermissionEngine
-        import os
+        from src.config import get_permission_config_paths
+        user_config, project_config = get_permission_config_paths()
         _permission_engine = PermissionEngine(
-            user_config=os.path.expanduser("~/.my-agent/permissions.json"),
-            project_config="agent-permissions.json",
+            user_config=user_config,
+            project_config=project_config,
         )
     return _permission_engine

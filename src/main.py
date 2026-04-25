@@ -38,7 +38,7 @@ async def async_main() -> None:
     history = MessageHistory()
     state = AgentState()
     register_mcp_tools(tool_registry)
-    flags = start_watchers(asyncio.get_running_loop())
+    start_watchers(asyncio.get_running_loop())
 
     while True:
         try:
@@ -53,17 +53,6 @@ async def async_main() -> None:
         if stripped in ("exit", "quit"):
             print("Bye.")
             break
-
-        if flags.skills_changed.is_set():
-            flags.skills_changed.clear()
-            from src.skills import get_skills, reset_sent_skills
-            get_skills(force_reload=True)
-            reset_sent_skills()
-            print("[watcher] Skills reloaded.")
-
-        if flags.memory_changed.is_set():
-            flags.memory_changed.clear()
-            print("[watcher] Memory files changed — will pick up on next recall.")
 
         try:
             await agent_loop(stripped, history, state)

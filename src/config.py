@@ -12,6 +12,7 @@ PROVIDER: str = os.environ.get("AGENT_PROVIDER", "anthropic")
 
 MODEL: str = "claude-sonnet-4-6"
 MAX_TOKENS: int = 16384
+MAX_CONTEXT_WINDOW: int = 200_000  # model context window size (for auto compact threshold)
 MAX_TURNS: int = 30
 MAX_AGENT_DEPTH: int = 3  # Maximum nesting depth for sub-agents (fork skills / agent tool)
 
@@ -24,6 +25,17 @@ MEMORY_ENABLED: bool = True
 MEMORY_SIDE_QUERY_MODEL: str = "claude-haiku-4-5-20251001"  # cheap model for recall side query
 MEMORY_MAX_FILES: int = 200          # max memory files to scan
 MEMORY_MAX_RELEVANT: int = 5         # max memories to inject per turn
+
+# Prompt Cache
+PROMPT_CACHE_ENABLED: bool = True
+PROMPT_CACHE_TTL_MINUTES: int = 5    # cache expiry threshold (minutes)
+
+# Micro Compact (Layer 1 context compaction)
+MICRO_COMPACT_ENABLED: bool = True
+MICRO_COMPACT_KEEP_RECENT: int = 6   # keep last N rounds of tool_results intact
+
+# Auto Compact (Layer 2 — LLM summarization)
+AUTO_COMPACT_MAX_TOKENS: int = 4096  # max tokens for the summary response
 
 # Sandbox (bash command isolation via bubblewrap)
 SANDBOX_ENABLED: bool = True
@@ -67,3 +79,12 @@ def get_agent_dirs() -> list[str]:
     for d in dirs:
         os.makedirs(d, exist_ok=True)
     return dirs
+
+
+def get_permission_config_paths() -> tuple[str, str]:
+    """Return (user_config_path, project_config_path) for permissions."""
+    home = str(Path.home())
+    cwd = os.getcwd()
+    user_config = os.path.join(home, ".my-agent", "permissions.json")
+    project_config = os.path.join(cwd, "agent-permissions.json")
+    return user_config, project_config

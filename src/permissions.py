@@ -117,6 +117,8 @@ class PermissionEngine:
         project_config: str | None = None,
         silent: bool = False,
     ) -> None:
+        self._user_config = user_config
+        self._project_config = project_config
         self._user_rules: list[PermissionRule] = []
         self._project_rules: list[PermissionRule] = []
         self._session_rules: list[PermissionRule] = []
@@ -126,6 +128,17 @@ class PermissionEngine:
             self._user_rules = self._load_config(user_config, "user")
         if project_config:
             self._project_rules = self._load_config(project_config, "project")
+
+    def reload(self) -> None:
+        """Reload user and project rules from disk. Session rules are preserved."""
+        self._user_rules = (
+            self._load_config(self._user_config, "user")
+            if self._user_config else []
+        )
+        self._project_rules = (
+            self._load_config(self._project_config, "project")
+            if self._project_config else []
+        )
 
     def _load_config(self, path: str, source: RuleSource) -> list[PermissionRule]:
         path = os.path.expanduser(path)

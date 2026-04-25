@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Generic, Literal, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Literal,
+)
+
+if TYPE_CHECKING:
+    from src.events import AgentEvent
+
+EventCallback = Callable[["AgentEvent"], None]
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +341,13 @@ class MessageHistory:
 
     # -- lifecycle ----------------------------------------------------------
 
+    def replace_with_summary(self, summary_text: str) -> None:
+        """Replace all messages with a single summary (auto-compact Layer 2)."""
+        self._messages.clear()
+        self._messages.append(Message(
+            role="user", content=summary_text, msg_type="human",
+        ))
+
     def clear(self) -> None:
         """Reset conversation history (e.g. user /clear command)."""
         self._messages.clear()
@@ -350,6 +368,7 @@ class ToolUseContext:
     abort_signal: bool = False
     tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for registry lookup
     permissions: Any | None = None      # PermissionEngine instance (avoid circular import)
+    on_event: EventCallback = field(default=lambda ev: None)
 
 
 @dataclass
@@ -369,16 +388,12 @@ class ToolResult:
 # ---------------------------------------------------------------------------
 # Tool executor contract
 #
-# Simple tools are `async def executor(...) -> ToolResult` (returns a
-# coroutine). Generator-like tools (Skill fork, Agent subagent) are sync
-# functions that build and return an AsyncGenWithResult so the runner can
-# iterate events AND recover a terminal ToolResult.
+# All tool executors are `async def executor(inputs, ctx) -> ToolResult`.
+# Tools that need to emit events (Skill fork, Agent subagent) use
+# ctx.on_event callback instead of yielding.
 # ---------------------------------------------------------------------------
 
-ToolExecutorReturn = Union[
-    Awaitable[ToolResult],
-    "AsyncGenWithResult[Any, ToolResult]",
-]
+ToolExecutorReturn = Awaitable[ToolResult]
 
 
 @dataclass
@@ -390,6 +405,8 @@ class AgentState:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_thinking_tokens: int = 0
+    last_usage_tokens: int = 0
+    messages_since_last_usage: int = 0
 
 
 class ToolDef:
@@ -435,82 +452,6 @@ class ToolDef:
         return self.schema["name"]
 
 
-# ---------------------------------------------------------------------------
-# AsyncGenWithResult — async generator + final value in one package
-#
-# Python's PEP 525 forbids `return value` inside `async def + yield`, so we
-# cannot directly port the sync `Generator[Y, None, R]` pattern (where the
-# final return value is captured via StopIteration.value / `yield from`).
-#
-# This wrapper is the substitute: it bundles an async event stream
-# (`events()`) with a result slot that the impl sets before finishing.
-# The same pattern is used at every site that needs "yield events + return
-# a value" — run_agent_loop, run_tool_use, Skill fork, Agent tool, etc.
-# ---------------------------------------------------------------------------
-
-E = TypeVar("E")
-R = TypeVar("R")
-
-
-class AsyncGenWithResult(Generic[E, R]):
-    """Wraps an async iterator impl that also produces a final result.
-
-    Construct with an impl callable `(self) -> AsyncIterator[E]` that yields
-    events and sets the final value via `self.set_result(value)` before
-    returning.  Callers consume `events()` with `async for`, then read
-    `.result` after the iteration completes.
-
-    Example:
-        async def _impl(run: AsyncGenWithResult[str, int]):
-            yield "starting"
-            yield "working"
-            run.set_result(42)
-
-        run = AsyncGenWithResult(_impl)
-        async for ev in run.events():
-            print(ev)
-        print(run.result)   # 42
-    """
-
-    def __init__(
-        self,
-        impl: Callable[["AsyncGenWithResult[E, R]"], AsyncIterator[E]],
-    ) -> None:
-        self._impl = impl
-        self._result: R | None = None
-        self._result_set = False
-
-    async def events(self) -> AsyncIterator[E]:
-        async for ev in self._impl(self):
-            yield ev
-
-    def set_result(self, value: R) -> None:
-        self._result = value
-        self._result_set = True
-
-    @property
-    def result(self) -> R:
-        if not self._result_set:
-            raise RuntimeError(
-                "AsyncGenWithResult.result read before impl called set_result(). "
-                "Did events() finish iterating?"
-            )
-        return self._result  # type: ignore[return-value]
-
-    @classmethod
-    def of_value(cls, value: R) -> "AsyncGenWithResult[Any, R]":
-        """Shortcut for the trivial case — no events, just a result.
-
-        Useful when a function normally yields events but hits an early
-        return (e.g., unknown skill, depth exceeded) and wants to stay
-        on the same return-type signature without launching a sub-loop.
-        """
-        async def _impl(run: "AsyncGenWithResult[Any, R]") -> AsyncIterator[Any]:
-            run.set_result(value)
-            if False:  # pragma: no cover — marks this as an async generator
-                yield
-
-        return cls(_impl)
 
 
 # ---------------------------------------------------------------------------

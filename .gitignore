@@ -52,8 +52,8 @@ EXPERIMENTS.md
 pyproject.toml
 
 .gitgnore
-C*
-D*
+/C*.md
+/D*.md
 .mcp.json
 CLAUDE.md
 README.md

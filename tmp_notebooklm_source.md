@@ -644,9 +644,18 @@ def __await__(self):        # 普通 def，不是 async def
 
 因为它是普通 `def`，不是 `async def`，所以 yield + return value 合法。
 
-### AsyncGenWithResult 存在的原因
+### AsyncGenWithResult 的历史与废弃
 
-正是因为 `async def` 不能同时 yield 事件流和 return 最终值，所以用 `set_result()` 手动设置返回值来绕过这个限制。本质上就是一个 async generator + 手动 result slot。
+正是因为 `async def` 不能同时 yield 事件流和 return 最终值，早期版本用 `AsyncGenWithResult`（async generator + 手动 `set_result()` result slot）来绕过这个限制。
+
+**已废弃**：在回调重构中，`AsyncGenWithResult` 已被完全删除。所有 `yield event` 替换为 `on_event(event)` 同步回调调用，函数直接 `return` 结果值。这样做的好处：
+- 函数签名回归正常的 `async def ... -> str`，不再需要 generator 协议
+- 事件传递通过回调链，不再需要 `yield from` 逐层冒泡
+- 代码复杂度大幅降低，`consume_events()` 辅助函数也一并删除
+
+`on_event: EventCallback` 通过两种方式传递：
+- 内部函数（run_agent_loop, _stream_call, execute_tool_groups）：显式函数参数
+- 工具 executor（skill fork, agent）：通过 `ToolUseContext.on_event` 字段
 
 ## 20. await future 的死锁陷阱
 
@@ -1899,3 +1908,87 @@ result = await some_future
 | 谁触发入队 | create_task 自己 | 外部 set_result |
 
 两者之后的循环完全一致：__step 执行 → 协程跑到下一个 yield → 暂停 → 等 set_result → 恢复。区别只是"第一次进入 _ready"的方式不同。
+
+## 44. yield（Generator）vs 回调（Callback）— 选择标准与本质区别
+
+### 核心区别：谁控制节奏
+
+| | yield（拉模型） | 回调（推模型） |
+|---|---|---|
+| 主动方 | 消费者（外层） | 生产者（内层） |
+| 内层行为 | 产出值后**暂停**，等消费者要下一个 | 有值就**直接推**，不等任何人 |
+| 消费者形态 | 完整的函数流程（有局部变量、控制流） | 被动的片段（没有自己的执行流程） |
+
+### yield 的独特优势：调用者局部状态联动
+
+yield 的消费者是一个完整的函数，有自己的局部变量、控制流（break/continue/if），天然和生产者同步：
+
+```python
+# yield — 调用者的局部变量天然可用
+def consumer():
+    count = 0
+    for item in producer():
+        count += 1
+        if count > 100:
+            break              # 直接停，producer 自动释放
+        if count % 10 == 0:
+            save_checkpoint()  # 根据自己的状态决定行为
+```
+
+回调要做同样的事，状态得外提或闭包捕获：
+
+```python
+# 回调 — 状态得搬到外面
+count = 0
+def on_item(item):
+    nonlocal count
+    count += 1
+    if count % 10 == 0:
+        save_checkpoint()
+    # 而且你没法 break，得靠别的机制通知 producer 停下来
+
+producer(on_event=on_item)
+```
+
+### 回调的优势：简单直接，不需要协议
+
+回调不需要 generator 协议（`__next__`/`send`/`throw`），不需要 `yield from` 冒泡，任何函数签名都能传：
+
+```python
+# 回调 — 随时随地可用
+def on_event(ev):
+    print(ev)
+
+run_agent_loop(on_event=on_event)  # 传进去就行
+```
+
+### 选择标准
+
+| 场景 | 选择 | 原因 |
+|------|------|------|
+| 外层需要控制消费速度（背压） | yield | 消费者不要，生产者就暂停 |
+| 数据流需要链式变换 | yield | `filter(map(gen))` 组合自然 |
+| 消费者需要复杂的局部状态和控制流 | yield | 完整的函数流程，break/continue 天然可用 |
+| 内层只是通知，不需要等反馈 | 回调 | 推完就走，最简单 |
+| 通知对象可能动态变化 | 回调 | 换个函数就行 |
+| 函数需要同时返回最终值 | 回调 | async def + return，不受 yield 限制 |
+
+### 并发场景下两者都需要缓冲
+
+不管用 yield 还是回调，多个并发生产者同时产出事件时，都会乱序。解决方案相同——加缓冲层：
+
+- Claude Code（TypeScript，yield 模式）：每个工具一个 `messages[]` 数组缓冲，按工具顺序逐个 yield
+- My-Agent（Python，回调模式）：每个工具一个 `asyncio.Queue` 缓冲，按工具顺序逐个 drain 后调真正的 on_event
+
+保证顺序的不是 yield 还是回调，而是中间的缓冲 + 按序消费。
+
+### My-Agent 选择回调的原因
+
+Agent 的事件（TextDelta、ToolStart、ToolEnd）是纯通知——print 到终端就完了，不需要：
+- 外层控制消费速度（print 瞬间完成）
+- 消费者的复杂局部状态联动
+- 链式数据变换
+
+而回调避免了 Python `async def` 的 `yield + return value` 限制（见第 19 节 AsyncGenWithResult 的历史），函数签名回归正常的 `async def ... -> str`。
+
+如果将来需要背压（比如前端来不及渲染，要求 agent 慢一点），那时才需要考虑 yield。

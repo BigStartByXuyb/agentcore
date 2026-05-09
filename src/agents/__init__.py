@@ -245,25 +245,28 @@ def format_agent_listing(agents: dict[str, AgentDefinition]) -> str:
     return "\n".join(lines)
 
 
-def build_agent_attachment(force: bool = False) -> Attachment | None:
+def build_agent_attachment(*, force: bool = False) -> Attachment | None:
     """Build a <system-reminder> user message listing available agents.
 
-    Returns None if there are no new agents to announce.
+    Called by build_agent_reminder() in messages.py — not intended for direct external use.
+
+    Parameters:
+        force: If True, reset sent tracking and return all agents (used after compact).
     """
     global _sent_agent_names
+
+    if force:
+        _sent_agent_names = set()
 
     all_agents = get_agents()
     if not all_agents:
         return None
 
-    if force:
-        new_agents = all_agents
-    else:
-        new_agents = {
-            name: defn
-            for name, defn in all_agents.items()
-            if name not in _sent_agent_names
-        }
+    new_agents = {
+        name: defn
+        for name, defn in all_agents.items()
+        if name not in _sent_agent_names
+    }
 
     if not new_agents:
         return None

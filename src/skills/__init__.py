@@ -279,30 +279,42 @@ def format_skill_listing(
 _sent_skill_names: set[str] = set()
 
 
-def build_skill_attachment(force: bool = False) -> Attachment | None:
+def build_skill_attachment(
+    *,
+    force: bool = False,
+    exclude_fork: bool = False,
+    filter_names: list[str] | None = None,
+) -> Attachment | None:
     """Build a <system-reminder> user message listing available skills.
 
-    Returns a Message ready to inject, or None if nothing new to announce.
+    Called by build_skill_reminder() in messages.py — not intended for direct external use.
+
+    Parameters:
+        force: If True, reset sent tracking and return all skills (used after compact).
     """
     global _sent_skill_names
+
+    if force:
+        _sent_skill_names = set()
 
     all_skills = get_skills()
     if not all_skills:
         return None
 
-    if force:
-        new_skills = all_skills
-    else:
-        new_skills = {
-            name: info
-            for name, info in all_skills.items()
-            if name not in _sent_skill_names
-        }
+    new_skills = {
+        name: info
+        for name, info in all_skills.items()
+        if name not in _sent_skill_names
+    }
 
     if not new_skills:
         return None
 
-    listing = format_skill_listing(new_skills)
+    listing = format_skill_listing(
+        new_skills,
+        exclude_fork=exclude_fork,
+        filter_names=filter_names,
+    )
     if not listing:
         return None
 

@@ -53,6 +53,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _reinject_after_compact(
+    history: MessageHistory,
+    rebuild_fn: Callable[[], list[Attachment]] | None,
+) -> None:
+    """Re-build and inject skill/agent/memory reminders after compact."""
+    if rebuild_fn is None:
+        return
+    attachments = rebuild_fn()
+    if not attachments:
+        return
+    last_msg = history.last_user_message()
+    if last_msg is not None:
+        last_msg.attach(attachments)
+
+
 async def run_agent_loop(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
@@ -64,6 +79,7 @@ async def run_agent_loop(
     stream: bool = False,
     thinking: dict | None = None,
     on_event: EventCallback,
+    on_compact_rebuild: Callable[[], list[Attachment]] | None = None,
 ) -> str:
     """Run the core LLM <-> tool execution cycle.
 
@@ -95,7 +111,8 @@ async def run_agent_loop(
 
         # --- Auto Compact: full LLM summarization if near context limit ---
         if should_auto_compact(estimate_token_count(history, _state)):
-            await auto_compact(history)
+            if await auto_compact(history):
+                _reinject_after_compact(history, on_compact_rebuild)
 
         tools = build_tool_schemas(
             tool_registry,
@@ -137,6 +154,7 @@ async def run_agent_loop(
             if _is_prompt_too_long(api_error):
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
                 if await auto_compact(history):
+                    _reinject_after_compact(history, on_compact_rebuild)
                     continue
 
             if _is_thinking_400(api_error) and thinking is not None:
@@ -236,19 +254,21 @@ async def agent_loop(
     main_tools = tool_registry.list_names()
 
     # --- Independent reminder channels (each can be reloaded separately) ---
-    skill_rem = build_skill_reminder(main_tools, use_sent_tracking=True)
-    agent_rem = build_agent_reminder(main_tools, use_sent_tracking=True)
-    memory_idx = build_memory_index_reminder()
+    def _build_attachments() -> list[Attachment]:
+        s = build_skill_reminder(main_tools, use_sent_tracking=True)
+        a = build_agent_reminder(main_tools, use_sent_tracking=True)
+        m = build_memory_index_reminder()
+        return [x for x in (s, a, m) if x]
 
-    attachments: list = []
-    if skill_rem:
-        attachments.append(skill_rem)
-    if agent_rem:
-        attachments.append(agent_rem)
-    if memory_idx:
-        attachments.append(memory_idx)
+    attachments = _build_attachments()
     if attachments:
         user_msg.attach(attachments)
+
+    def _rebuild_reminders() -> list[Attachment]:
+        s = build_skill_reminder(main_tools, use_sent_tracking=True, force=True)
+        a = build_agent_reminder(main_tools, use_sent_tracking=True, force=True)
+        m = build_memory_index_reminder()
+        return [x for x in (s, a, m) if x]
 
     history_copy = copy.copy(history)
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
@@ -273,6 +293,7 @@ async def agent_loop(
         stream=True,
         thinking=_build_thinking_param(),
         on_event=handler,
+        on_compact_rebuild=_rebuild_reminders,
     )
 
     # Background memory extraction — fire-and-forget asyncio task

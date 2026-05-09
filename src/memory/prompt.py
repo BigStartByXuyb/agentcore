@@ -46,7 +46,7 @@ def build_memory_prompt(memory_dir: str | None = None) -> str | None:
     return _build_behavioral_instructions(mem_dir)
 
 
-def build_memory_user_message(memory_dir: str | None = None) -> str | None:
+def build_memory_user_message() -> str | None:
     """Load the MEMORY.md index content for per-turn injection.
 
     Returns the raw index text, or None if memory is disabled or
@@ -56,8 +56,7 @@ def build_memory_user_message(memory_dir: str | None = None) -> str | None:
     if not config.MEMORY_ENABLED:
         return None
 
-    mem_dir = memory_dir or get_memory_dir()
-    return _load_entrypoint(mem_dir)
+    return _load_entrypoint()
 
 
 def _build_behavioral_instructions(memory_dir: str) -> str:
@@ -123,7 +122,7 @@ use recalled content as context for your response.
 - Convert relative dates to absolute dates when saving"""
 
 
-def _load_entrypoint(memory_dir: str) -> str | None:
+def _load_entrypoint() -> str | None:
     """Read MEMORY.md content, truncating at _MAX_ENTRYPOINT_LINES."""
     entrypoint = get_memory_entrypoint()
     if not os.path.isfile(entrypoint):

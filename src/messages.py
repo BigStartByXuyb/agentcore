@@ -13,54 +13,32 @@ def build_skill_reminder(
     tools: list[str],
     *,
     use_sent_tracking: bool = True,
+    force: bool = False,
     skill_filter: list[str] | None = None,
     exclude_fork_skills: bool = False,
 ) -> Attachment | None:
-    """Build skill listing attachment. Returns None if skill tool not available."""
+    """Build skill listing attachment — the single public API for skill injection.
+
+    Parameters:
+        tools:              Current available tool names; returns None if 'skill' not present.
+        use_sent_tracking:  If True, only send new/unsent skills (main agent multi-turn).
+                            If False, send all skills every time (sub-agent one-shot).
+        force:              If True with sent_tracking, force full re-send (e.g. after compact).
+        skill_filter:       Only include skills with these names (sub-agent precise mode).
+        exclude_fork_skills: Skip fork-mode skills (sub-agent can't nest agent loops).
+    """
     if "skill" not in {t.lower() for t in tools}:
         return None
-    return _build_skill_reminder_msg(
-        use_sent_tracking=use_sent_tracking,
-        skill_filter=skill_filter,
-        exclude_fork_skills=exclude_fork_skills,
-    )
 
+    from src.skills import build_skill_attachment, get_skills, format_skill_listing
 
-def build_agent_reminder(
-    tools: list[str],
-    *,
-    use_sent_tracking: bool = True,
-) -> Attachment | None:
-    """Build agent listing attachment. Returns None if agent tool not available."""
-    if "agent" not in {t.lower() for t in tools}:
-        return None
-    return _build_agent_reminder_msg(use_sent_tracking=use_sent_tracking)
-
-
-def build_memory_index_reminder() -> Attachment | None:
-    """Build memory index (MEMORY.md) attachment — synchronous, always injected."""
-    from src.memory.prompt import build_memory_user_message
-    content = build_memory_user_message()
-    if not content:
-        return None
-    return Attachment(
-        type="memory_index",
-        content=f"<memory-index>\n{content}\n</memory-index>",
-    )
-
-
-def _build_skill_reminder_msg(
-    *,
-    use_sent_tracking: bool,
-    skill_filter: list[str] | None,
-    exclude_fork_skills: bool,
-) -> Attachment | None:
-    """Build the skill reminder user message, honoring sub-agent isolation."""
     if use_sent_tracking:
-        from src.skills import build_skill_attachment
-        return build_skill_attachment()
+        return build_skill_attachment(
+            force=force,
+            exclude_fork=exclude_fork_skills,
+            filter_names=skill_filter,
+        )
 
-    from src.skills import get_skills, format_skill_listing
     all_skills = get_skills()
     if not all_skills:
         return None
@@ -77,13 +55,28 @@ def _build_skill_reminder_msg(
     )
 
 
-def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Attachment | None:
-    """Build the agent reminder user message, honoring sub-agent isolation."""
-    if use_sent_tracking:
-        from src.agents import build_agent_attachment
-        return build_agent_attachment()
+def build_agent_reminder(
+    tools: list[str],
+    *,
+    use_sent_tracking: bool = True,
+    force: bool = False,
+) -> Attachment | None:
+    """Build agent listing attachment — the single public API for agent injection.
 
-    from src.agents import get_agents, format_agent_listing
+    Parameters:
+        tools:              Current available tool names; returns None if 'agent' not present.
+        use_sent_tracking:  If True, only send new/unsent agents (main agent multi-turn).
+                            If False, send all agents every time (sub-agent one-shot).
+        force:              If True with sent_tracking, force full re-send (e.g. after compact).
+    """
+    if "agent" not in {t.lower() for t in tools}:
+        return None
+
+    from src.agents import build_agent_attachment, get_agents, format_agent_listing
+
+    if use_sent_tracking:
+        return build_agent_attachment(force=force)
+
     all_agents = get_agents()
     if not all_agents:
         return None
@@ -94,6 +87,19 @@ def _build_agent_reminder_msg(*, use_sent_tracking: bool) -> Attachment | None:
         type="system_reminder",
         content=f"<system-reminder>\n{listing}\n</system-reminder>",
     )
+
+
+def build_memory_index_reminder() -> Attachment | None:
+    """Build memory index (MEMORY.md) attachment — synchronous, always injected."""
+    from src.memory.prompt import build_memory_user_message
+    content = build_memory_user_message()
+    if not content:
+        return None
+    return Attachment(
+        type="memory_index",
+        content=f"<memory-index>\n{content}\n</memory-index>",
+    )
+
 
 # tools checking and schema construction for the API "tools" parameter is centralized
 def build_tool_schemas(

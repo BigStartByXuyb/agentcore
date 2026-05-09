@@ -185,6 +185,7 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
             msg.attach(attachments)
 
     # --- Sub-agent context ---
+    from src.file_state_cache import FileStateCache
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
@@ -192,6 +193,7 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         abort_signal=context.abort_signal,
         permissions=context.permissions.as_silent() if context.permissions else None,
         on_event=context.on_event,
+        file_state_cache=FileStateCache(),
     )
 
     # --- Sub-agent state ---

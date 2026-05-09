@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 import anthropic.types
 
@@ -243,6 +243,7 @@ async def agent_loop(
     user_input: str,
     history: MessageHistory,
     state: AgentState,
+    file_state_cache: Any | None = None,
 ) -> str:
     """Run the agent loop for a single user turn.
 
@@ -278,6 +279,7 @@ async def agent_loop(
         messages=history,
         tools=tool_registry.list_names(),
         permissions=_get_permission_engine(),
+        file_state_cache=file_state_cache,
     )
 
     turn_start_index = len(history)

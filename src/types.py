@@ -351,6 +351,7 @@ class ToolUseContext:
     tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for registry lookup
     permissions: Any | None = None      # PermissionEngine instance (avoid circular import)
     on_event: EventCallback = field(default=lambda ev: None)
+    file_state_cache: Any | None = None  # FileStateCache instance (avoid circular import)
 
 
 @dataclass

@@ -6,6 +6,7 @@ import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
+from src.file_state_cache import FileState
 
 SCHEMA: dict = {
     "name": "read_file",
@@ -40,6 +41,11 @@ SCHEMA: dict = {
 
 DEFAULT_LIMIT = 2000
 
+FILE_UNCHANGED_STUB = (
+    "File unchanged since last read. "
+    "The content from the earlier Read tool_result in this conversation is still current."
+)
+
 
 def _read_lines_sync(file_path: str) -> list[str]:
     """Blocking I/O helper — called via asyncio.to_thread."""
@@ -52,22 +58,40 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     offset: int = inputs.get("offset", 0)
     limit: int = inputs.get("limit", DEFAULT_LIMIT)
 
-    if not os.path.exists(file_path):
+    abs_path = os.path.normpath(os.path.abspath(file_path))
+
+    if not os.path.exists(abs_path):
         return ToolResult(data={
             "type": "error",
             "content": f"File not found: {file_path}",
             "total_lines": 0,
         })
 
-    if not os.path.isfile(file_path):
+    if not os.path.isfile(abs_path):
         return ToolResult(data={
             "type": "error",
             "content": f"Not a file: {file_path}",
             "total_lines": 0,
         })
 
+    # --- dedup check ---
+    cache = context.file_state_cache
+    if cache:
+        cached = cache.get(abs_path)
+        if (cached
+                and cached.offset is not None
+                and cached.offset == offset
+                and cached.limit == limit):
+            try:
+                current_mtime = os.path.getmtime(abs_path)
+                if current_mtime == cached.mtime:
+                    return ToolResult(data={"type": "file_unchanged", "file_path": file_path})
+            except OSError:
+                pass
+
+    # --- normal read ---
     try:
-        all_lines = await asyncio.to_thread(_read_lines_sync, file_path)
+        all_lines = await asyncio.to_thread(_read_lines_sync, abs_path)
     except Exception as e:
         return ToolResult(data={
             "type": "error",
@@ -78,13 +102,20 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     total_lines = len(all_lines)
     selected = all_lines[offset : offset + limit]
 
-    # Add line numbers (1-based, matching cat -n format)
     numbered = []
     for i, line in enumerate(selected, start=offset + 1):
         numbered.append(f"{i}\t{line.rstrip()}")
 
     content = "\n".join(numbered)
     truncated = (offset + limit) < total_lines
+
+    # --- update cache ---
+    if cache:
+        try:
+            mtime = os.path.getmtime(abs_path)
+        except OSError:
+            mtime = 0.0
+        cache.set(abs_path, FileState(mtime=mtime, offset=offset, limit=limit))
 
     return ToolResult(data={
         "type": "text",
@@ -99,6 +130,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
 def map_result(data: dict) -> str:
     if data.get("type") == "error":
         return data["content"]
+
+    if data.get("type") == "file_unchanged":
+        return FILE_UNCHANGED_STUB
 
     content = data.get("content", "")
     if not content:
@@ -121,7 +155,5 @@ tool = ToolDef(
     executor=executor,
     map_result=map_result,
     is_read_only=is_read_only,
-    # Output bounded by limit param; persisting creates circular Read→file→Read loop.
-    # Matches Claude Code FileReadTool: maxResultSizeChars = Infinity
     max_result_size_chars=999_999_999,
 )

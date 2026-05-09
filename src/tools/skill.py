@@ -222,6 +222,7 @@ async def _execute_fork(
         if attachments:
             msg.attach(attachments)
 
+    from src.file_state_cache import FileStateCache
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
@@ -229,6 +230,7 @@ async def _execute_fork(
         abort_signal=context.abort_signal,
         permissions=context.permissions.as_silent() if context.permissions else None,
         on_event=context.on_event,
+        file_state_cache=FileStateCache(),
     )
 
     sub_state = AgentState(agent_id=f"fork:{skill.name}")

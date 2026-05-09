@@ -222,7 +222,6 @@ class MessageHistory:
 
     def __init__(self, messages: list[Message] | None = None) -> None:
         self._messages: list[Message] = messages if messages is not None else []
-        self.surfaced_memories: set[str] = set()
 
     # -- read access --------------------------------------------------------
 
@@ -310,33 +309,17 @@ class MessageHistory:
                 result.append(d)
         return result
 
-    # -- memory dedup -------------------------------------------------------
-
-    def collect_surfaced_memories(self) -> set[str]:
-        """Rebuild surfaced_memories from message attachments.
-
-        Used after loading a persisted history to reconstruct the set.
-        """
-        paths: set[str] = set()
-        for msg in self._messages:
-            for att in msg.attachments:
-                if att.type == "relevant_memories":
-                    paths.update(att.metadata.get("files", []))
-        return paths
-
     # -- persistence --------------------------------------------------------
 
     def to_serializable(self) -> dict:
         return {
             "messages": [m.to_serializable() for m in self._messages],
-            "surfaced_memories": list(self.surfaced_memories),
         }
 
     @classmethod
     def from_serializable(cls, data: dict) -> MessageHistory:
         h = cls()
         h._messages = [Message.from_serializable(m) for m in data.get("messages", [])]
-        h.surfaced_memories = set(data.get("surfaced_memories", []))
         return h
 
     # -- lifecycle ----------------------------------------------------------
@@ -351,7 +334,6 @@ class MessageHistory:
     def clear(self) -> None:
         """Reset conversation history (e.g. user /clear command)."""
         self._messages.clear()
-        self.surfaced_memories.clear()
 
 
 # ---------------------------------------------------------------------------

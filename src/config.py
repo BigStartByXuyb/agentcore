@@ -37,6 +37,15 @@ MICRO_COMPACT_KEEP_RECENT: int = 6   # keep last N rounds of tool_results intact
 # Auto Compact (Layer 2 — LLM summarization)
 AUTO_COMPACT_MAX_TOKENS: int = 4096  # max tokens for the summary response
 
+# Token estimation
+BYTES_PER_TOKEN: int = 2  # conservative: covers CJK (~1-2 token/char, 3 bytes) and English (~0.25 token/char, 1 byte)
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate from UTF-8 byte length. Conservative (overestimates)."""
+    return len(text.encode("utf-8")) // BYTES_PER_TOKEN
+
+
 # Sandbox (bash command isolation via bubblewrap)
 SANDBOX_ENABLED: bool = True
 SANDBOX_ALLOW_WRITE: list[str] = []           # additional writable paths (project dir + /tmp always allowed)

@@ -44,16 +44,16 @@ def estimate_token_count(history: MessageHistory, state: AgentState | None = Non
 
 
 def _rough_estimate_messages(messages: list) -> int:
-    """Estimate token count for a list of messages. Uses len/4 like Claude Code."""
+    """Estimate token count for a list of messages using UTF-8 byte length."""
     total = 0
     for msg in messages:
         if isinstance(msg.content, str):
-            total += len(msg.content) // 4
+            total += config.estimate_tokens(msg.content)
         elif isinstance(msg.content, list):
             for block in msg.content:
                 text = getattr(block, "text", None) or getattr(block, "content", None) or ""
                 if isinstance(text, str):
-                    total += len(text) // 4
+                    total += config.estimate_tokens(text)
     return total
 
 

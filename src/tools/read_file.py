@@ -7,6 +7,7 @@ import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
 from src.file_state_cache import FileState
+from src import config
 
 SCHEMA: dict = {
     "name": "read_file",
@@ -40,6 +41,8 @@ SCHEMA: dict = {
 }
 
 DEFAULT_LIMIT = 2000
+MAX_FILE_SIZE_BYTES = 256 * 1024  # 256 KB — reject full-read if file exceeds this
+MAX_OUTPUT_TOKENS = 25_000        # single read token budget
 
 FILE_UNCHANGED_STUB = (
     "File unchanged since last read. "
@@ -74,6 +77,25 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "total_lines": 0,
         })
 
+    # --- file size gate (only for full reads without explicit offset/limit) ---
+    explicit_range = "offset" in inputs or "limit" in inputs
+    if not explicit_range:
+        try:
+            file_size = os.path.getsize(abs_path)
+            if file_size > MAX_FILE_SIZE_BYTES:
+                return ToolResult(data={
+                    "type": "error",
+                    "content": (
+                        f"File content ({file_size:,} bytes) exceeds maximum allowed size "
+                        f"({MAX_FILE_SIZE_BYTES:,} bytes). "
+                        "Use offset and limit parameters to read specific portions of the file, "
+                        "or use grep to search for specific content instead of reading the whole file."
+                    ),
+                    "total_lines": 0,
+                })
+        except OSError:
+            pass
+
     # --- dedup check ---
     cache = context.file_state_cache
     if cache:
@@ -107,6 +129,21 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         numbered.append(f"{i}\t{line.rstrip()}")
 
     content = "\n".join(numbered)
+
+    # --- output token estimate gate ---
+    estimated_tokens = config.estimate_tokens(content)
+    if estimated_tokens > MAX_OUTPUT_TOKENS:
+        return ToolResult(data={
+            "type": "error",
+            "content": (
+                f"File output (~{estimated_tokens:,} tokens) exceeds maximum allowed "
+                f"({MAX_OUTPUT_TOKENS:,} tokens). "
+                "Use offset and limit to read a smaller range, "
+                "or use grep to search for specific content."
+            ),
+            "total_lines": total_lines,
+        })
+
     truncated = (offset + limit) < total_lines
 
     # --- update cache ---

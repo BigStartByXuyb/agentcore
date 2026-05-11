@@ -49,7 +49,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     # --- stale check: reject if file was externally modified since last read ---
     if cache and os.path.exists(abs_path):
         cached = cache.get(abs_path)
-        if not cached:
+        if not cached or cached.isPartialView:
             return ToolResult(data={
                 "type": "error",
                 "content": "File has not been read yet. Read it first before writing to it.",
@@ -57,13 +57,23 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         try:
             disk_mtime = os.path.getmtime(abs_path)
             if disk_mtime > cached.mtime:
-                return ToolResult(data={
-                    "type": "error",
-                    "content": (
-                        "File has been externally modified since last read. "
-                        "Read it again before writing."
-                    ),
-                })
+                is_full_read = cached.offset is None and cached.limit is None
+                content_unchanged = False
+                if is_full_read:
+                    try:
+                        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                            disk_content = f.read()
+                        content_unchanged = disk_content == cached.content
+                    except Exception:
+                        pass
+                if not content_unchanged:
+                    return ToolResult(data={
+                        "type": "error",
+                        "content": (
+                            "File has been externally modified since last read. "
+                            "Read it again before writing."
+                        ),
+                    })
         except OSError:
             pass
 

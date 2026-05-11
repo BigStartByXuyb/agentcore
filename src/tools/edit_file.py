@@ -92,7 +92,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     # --- stale check ---
     if cache:
         cached = cache.get(abs_path)
-        if not cached:
+        if not cached or cached.isPartialView:
             return ToolResult(data={
                 "type": "error",
                 "content": "File has not been read yet. Read it first before editing.",
@@ -100,10 +100,27 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         try:
             disk_mtime = os.path.getmtime(abs_path)
             if disk_mtime > cached.mtime:
-                return ToolResult(data={
-                    "type": "error",
-                    "content": "File has been externally modified since last read. Read it again before editing.",
-                })
+                is_full_read = cached.offset is None and cached.limit is None
+                if is_full_read:
+                    try:
+                        disk_content = await asyncio.to_thread(_read_file_sync, abs_path)
+                        if disk_content == cached.content:
+                            pass  # content unchanged, safe to proceed
+                        else:
+                            return ToolResult(data={
+                                "type": "error",
+                                "content": "File has been externally modified since last read. Read it again before editing.",
+                            })
+                    except Exception:
+                        return ToolResult(data={
+                            "type": "error",
+                            "content": "File has been externally modified since last read. Read it again before editing.",
+                        })
+                else:
+                    return ToolResult(data={
+                        "type": "error",
+                        "content": "File has been externally modified since last read. Read it again before editing.",
+                    })
         except OSError:
             pass
 

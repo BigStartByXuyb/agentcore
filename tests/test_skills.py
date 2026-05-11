@@ -47,10 +47,10 @@ from src.skills import (
     discover_skills,
     build_skill_content,
     format_skill_listing,
-    build_skill_reminder,
     reset_sent_skills,
     SkillInfo,
 )
+from src.messages import build_skill_reminder
 from src.tools.skill import _execute, _map_result
 from src.types import ToolUseContext
 

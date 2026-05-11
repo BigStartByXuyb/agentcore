@@ -34,6 +34,7 @@ from src.types import (
     ToolUseContext,
 )
 from src.skills import get_skill, build_skill_content
+from src.types import InvokedSkillInfo
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,13 @@ def _execute_inline(skill, inputs: dict, context: ToolUseContext) -> ToolResult:
             "Please follow the skill instructions above."
         ),
         msg_type="meta",
+    )
+
+    # --- Record invoked skill for post-compact re-injection ---
+    context.invoked_skills[skill.name] = InvokedSkillInfo(
+        skill_name=skill.name,
+        skill_path=skill.base_dir,
+        content=content,
     )
 
     context_modifier = None

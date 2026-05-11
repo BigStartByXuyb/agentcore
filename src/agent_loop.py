@@ -48,6 +48,101 @@ from src.compact.auto_compact import should_auto_compact, auto_compact, estimate
 
 logger = logging.getLogger(__name__)
 
+POST_COMPACT_MAX_TOKENS_PER_SKILL = 5_000
+POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
+POST_COMPACT_MAX_FILES = 5
+POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000
+POST_COMPACT_FILES_TOKEN_BUDGET = 50_000
+
+
+def _build_invoked_skills_attachment(
+    invoked_skills: dict[str, Any],
+) -> Attachment | None:
+    """Build an attachment containing all inline skills invoked this session.
+
+    Re-injected after compaction so the LLM retains the skill guidelines
+    even though the original skill-content messages were summarized away.
+    """
+    if not invoked_skills:
+        return None
+
+    skills = sorted(
+        invoked_skills.values(),
+        key=lambda s: s.invoked_at,
+        reverse=True,
+    )
+
+    parts: list[str] = []
+    used_tokens = 0
+    for sk in skills:
+        content = sk.content
+        tokens = config.estimate_tokens(content)
+        if tokens > POST_COMPACT_MAX_TOKENS_PER_SKILL:
+            ratio = POST_COMPACT_MAX_TOKENS_PER_SKILL / tokens
+            content = content[: int(len(content) * ratio)]
+            tokens = POST_COMPACT_MAX_TOKENS_PER_SKILL
+        if used_tokens + tokens > POST_COMPACT_SKILLS_TOKEN_BUDGET:
+            break
+        used_tokens += tokens
+        parts.append(f"### Skill: {sk.skill_name}\nPath: {sk.skill_path}\n\n{content}")
+
+    if not parts:
+        return None
+
+    body = "\n\n---\n\n".join(parts)
+    text = (
+        "<system-reminder>\n"
+        "The following skills were invoked in this session. "
+        "Continue to follow these guidelines:\n\n"
+        f"{body}\n"
+        "</system-reminder>"
+    )
+    return Attachment(type="invoked_skills", content=text)
+
+
+def _build_file_restore_attachments(
+    snapshot: dict[str, Any],
+) -> Attachment | None:
+    """Build an attachment restoring recently-read files after compaction.
+
+    Takes a snapshot of the file state cache (captured before clearing).
+    Selects the most recent files within token budget and re-injects their
+    content as fake Read tool results.
+    """
+    if not snapshot:
+        return None
+
+    # snapshot preserves OrderedDict insertion order (LRU: oldest→newest).
+    # Reverse to get most-recently-accessed first.
+    recent = list(reversed(list(snapshot.items())))[:POST_COMPACT_MAX_FILES]
+
+    parts: list[str] = []
+    used_tokens = 0
+    for path, state in recent:
+        content = state.content
+        tokens = config.estimate_tokens(content)
+        if tokens > POST_COMPACT_MAX_TOKENS_PER_FILE:
+            ratio = POST_COMPACT_MAX_TOKENS_PER_FILE / tokens
+            content = content[: int(len(content) * ratio)]
+            tokens = POST_COMPACT_MAX_TOKENS_PER_FILE
+        if used_tokens + tokens > POST_COMPACT_FILES_TOKEN_BUDGET:
+            break
+        used_tokens += tokens
+        parts.append(
+            f'<system-reminder>\n'
+            f'Called the Read tool with the following input: {{"file_path":"{path}"}}\n'
+            f'</system-reminder>\n'
+            f'<system-reminder>\n'
+            f'Result of calling the Read tool:\n{content}\n'
+            f'</system-reminder>'
+        )
+
+    if not parts:
+        return None
+
+    return Attachment(type="system_reminder", content="\n".join(parts))
+
+
 # ---------------------------------------------------------------------------
 # Low-level agent loop — shared by top-level REPL and sub-agents
 # ---------------------------------------------------------------------------
@@ -55,12 +150,13 @@ logger = logging.getLogger(__name__)
 
 def _reinject_after_compact(
     history: MessageHistory,
-    rebuild_fn: Callable[[], list[Attachment]] | None,
+    rebuild_fn: Callable[[dict[str, Any]], list[Attachment]] | None,
+    file_snapshot: dict[str, Any] | None = None,
 ) -> None:
-    """Re-build and inject skill/agent/memory reminders after compact."""
+    """Re-build and inject all post-compact attachments."""
     if rebuild_fn is None:
         return
-    attachments = rebuild_fn()
+    attachments = rebuild_fn(file_snapshot or {})
     if not attachments:
         return
     last_msg = history.last_user_message()
@@ -79,7 +175,7 @@ async def run_agent_loop(
     stream: bool = False,
     thinking: dict | None = None,
     on_event: EventCallback,
-    on_compact_rebuild: Callable[[], list[Attachment]] | None = None,
+    on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
 ) -> str:
     """Run the core LLM <-> tool execution cycle.
 
@@ -111,8 +207,12 @@ async def run_agent_loop(
 
         # --- Auto Compact: full LLM summarization if near context limit ---
         if should_auto_compact(estimate_token_count(history, _state)):
+            cache = tool_use_context.file_state_cache
+            file_snapshot = cache.snapshot() if cache else {}
             if await auto_compact(history):
-                _reinject_after_compact(history, on_compact_rebuild)
+                if cache:
+                    cache.clear()
+                _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
 
         tools = build_tool_schemas(
             tool_registry,
@@ -153,8 +253,12 @@ async def run_agent_loop(
             # Layer 3: reactive compact on prompt_too_long
             if _is_prompt_too_long(api_error):
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
+                cache = tool_use_context.file_state_cache
+                file_snapshot = cache.snapshot() if cache else {}
                 if await auto_compact(history):
-                    _reinject_after_compact(history, on_compact_rebuild)
+                    if cache:
+                        cache.clear()
+                    _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
                     continue
 
             if _is_thinking_400(api_error) and thinking is not None:
@@ -265,11 +369,13 @@ async def agent_loop(
     if attachments:
         user_msg.attach(attachments)
 
-    def _rebuild_reminders() -> list[Attachment]:
+    def _rebuild_after_compact(file_snapshot: dict[str, Any]) -> list[Attachment]:
         s = build_skill_reminder(main_tools, use_sent_tracking=True, force=True)
         a = build_agent_reminder(main_tools, use_sent_tracking=True, force=True)
         m = build_memory_index_reminder()
-        return [x for x in (s, a, m) if x]
+        k = _build_invoked_skills_attachment(tool_use_context.invoked_skills)
+        f = _build_file_restore_attachments(file_snapshot)
+        return [x for x in (s, a, m, k, f) if x]
 
     history_copy = copy.copy(history)
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
@@ -295,7 +401,7 @@ async def agent_loop(
         stream=True,
         thinking=_build_thinking_param(),
         on_event=handler,
-        on_compact_rebuild=_rebuild_reminders,
+        on_compact_rebuild=_rebuild_after_compact,
     )
 
     # Background memory extraction — fire-and-forget asyncio task

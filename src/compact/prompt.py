@@ -24,6 +24,7 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
    - Specific details: file names, code snippets, function signatures, file edits
    - Errors encountered and how they were fixed
    - User feedback, especially corrections
+   - Skills invoked (via the Skill tool) and their execution progress — which steps were completed, which are pending
 
 Your summary should include:
 
@@ -34,8 +35,9 @@ Your summary should include:
 5. Problem Solving: Document problems solved and ongoing troubleshooting
 6. All User Messages: List ALL non-tool-result user messages
 7. Pending Tasks: Outline pending tasks explicitly asked to work on
-8. Current Work: Describe precisely what was being worked on immediately before this summary
-9. Optional Next Step: The next step related to the most recent work
+8. Active Skills: For each skill invoked in this session, record: skill name, what steps were completed, what steps remain, and whether it is still in progress or finished. If no skills were used, write "None".
+9. Current Work: Describe precisely what was being worked on immediately before this summary. If a skill is active, include which step of the skill you were on.
+10. Optional Next Step: The next step related to the most recent work. Include direct quotes from the most recent conversation to ensure no drift in task interpretation.
 
 <example>
 <analysis>
@@ -66,11 +68,15 @@ Your summary should include:
 7. Pending Tasks:
    - [Task 1]
 
-8. Current Work:
-   [Description]
+8. Active Skills:
+   - [Skill Name]: completed steps 1-3, step 4 in progress / finished
+   or: None
 
-9. Optional Next Step:
-   [Next step]
+9. Current Work:
+   [Description, including active skill step if applicable]
+
+10. Optional Next Step:
+   [Next step with direct quotes from recent conversation]
 
 </summary>
 </example>

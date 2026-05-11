@@ -40,8 +40,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.agents import (
     AgentDefinition, get_agent, list_agents,
     discover_agents, _load_agent_from_dir,
-    format_agent_listing, build_agent_reminder, reset_sent_agents,
+    format_agent_listing, reset_sent_agents,
 )
+from src.messages import build_agent_reminder
 from src.agents.explore import explore_agent
 from src.tools.agent import (
     _execute, _map_result, _resolve_tools, _DEFAULT_AGENT, AGENT_SCHEMA,

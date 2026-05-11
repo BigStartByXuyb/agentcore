@@ -102,7 +102,29 @@ Read file contents with line numbers. Use for:
 - Reading configuration files
 - Inspecting any text file
 
-Supports `offset` and `limit` for reading specific portions of large files.
+Supports `offset` and `limit` for reading specific portions of large files. \
+Files larger than 256 KB will return an error — use offset and limit to \
+read specific portions, or use grep to search for specific content.
+
+You MUST read a file before editing or writing to it. This ensures you \
+have the current content and prevents accidental overwrites.
+
+## edit_file
+Make targeted edits to an existing file using find-and-replace. \
+**Prefer this over write_file for modifying existing files** — it only \
+sends the diff rather than the full file content.
+
+Provide the exact text to find (old_string) and what to replace it \
+with (new_string). The old_string must match exactly — include enough \
+surrounding context to be unique. If there are multiple matches, \
+either provide more context or set replace_all to true.
+
+## write_file
+Create a new file or completely overwrite an existing file. Use for:
+- Creating new files from scratch
+- Complete file rewrites when edit_file is impractical
+
+Do NOT use write_file to make small modifications — use edit_file instead.
 
 ## grep
 Search file contents with regex patterns. Use for:

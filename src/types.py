@@ -81,7 +81,7 @@ ContentBlock = TextContent | ToolUseContent | ToolResultContent | ThinkingConten
 # Attachment — metadata attached to a Message
 # ---------------------------------------------------------------------------
 
-AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index"]
+AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index", "invoked_skills"]
 
 
 @dataclass
@@ -351,7 +351,9 @@ class ToolUseContext:
     tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for registry lookup
     permissions: Any | None = None      # PermissionEngine instance (avoid circular import)
     on_event: EventCallback = field(default=lambda ev: None)
-    file_state_cache: Any | None = None  # FileStateCache instance (avoid circular import)
+    # --- session-level caches (cleared on /clear, consumed by compaction) ---
+    file_state_cache: Any | None = None                                # FileStateCache instance
+    invoked_skills: dict[str, "InvokedSkillInfo"] = field(default_factory=dict)  # inline skills active this session
 
 
 @dataclass
@@ -377,6 +379,20 @@ class ToolResult:
 # ---------------------------------------------------------------------------
 
 ToolExecutorReturn = Awaitable[ToolResult]
+
+
+@dataclass
+class InvokedSkillInfo:
+    """Tracks an inline skill invoked during this session.
+
+    Stored on AgentState so the skill content can be re-injected after compaction.
+    Only inline skills are tracked — fork skills run to completion and don't need
+    re-injection.
+    """
+    skill_name: str
+    skill_path: str
+    content: str
+    invoked_at: float = field(default_factory=time.time)
 
 
 @dataclass

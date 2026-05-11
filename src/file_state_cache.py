@@ -15,6 +15,7 @@ class FileState:
     mtime: float
     offset: int | None = None
     limit: int | None = None
+    isPartialView: bool = False
 
 
 class FileStateCache:

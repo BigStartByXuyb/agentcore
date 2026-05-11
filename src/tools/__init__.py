@@ -14,6 +14,7 @@ from src.tools.write_file import tool as write_file_tool
 from src.tools.grep import tool as grep_tool
 from src.tools.skill import tool as skill_tool
 from src.tools.agent import tool as agent_tool
+from src.tools.edit_file import tool as edit_file_tool
 
 
 class ToolRegistry:
@@ -63,3 +64,4 @@ registry.register(write_file_tool.name, write_file_tool)
 registry.register(grep_tool.name, grep_tool)
 registry.register(skill_tool.name, skill_tool)
 registry.register(agent_tool.name, agent_tool)
+registry.register(edit_file_tool.name, edit_file_tool)

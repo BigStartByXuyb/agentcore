@@ -9,8 +9,9 @@ from dataclasses import dataclass
 
 @dataclass
 class FileState:
-    """State of a file at the time it was last read."""
+    """State of a file at the time it was last read/written."""
 
+    content: str
     mtime: float
     offset: int | None = None
     limit: int | None = None
@@ -43,6 +44,19 @@ class FileStateCache:
 
     def clear(self) -> None:
         self._cache.clear()
+
+    def delete(self, path: str) -> None:
+        key = self._normalize(path)
+        self._cache.pop(key, None)
+
+    def keys(self) -> list[str]:
+        return list(self._cache.keys())
+
+    def items(self) -> list[tuple[str, FileState]]:
+        return list(self._cache.items())
+
+    def __len__(self) -> int:
+        return len(self._cache)
 
     def snapshot(self) -> dict[str, FileState]:
         return dict(self._cache)

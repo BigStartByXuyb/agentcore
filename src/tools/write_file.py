@@ -6,6 +6,7 @@ import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
+from src.file_state_cache import FileState
 
 SCHEMA: dict = {
     "name": "write_file",
@@ -42,13 +43,50 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     file_path: str = inputs["file_path"]
     content: str = inputs.get("content", "")
 
+    abs_path = os.path.normpath(os.path.abspath(file_path))
+    cache = context.file_state_cache
+
+    # --- stale check: reject if file was externally modified since last read ---
+    if cache and os.path.exists(abs_path):
+        cached = cache.get(abs_path)
+        if not cached:
+            return ToolResult(data={
+                "type": "error",
+                "content": "File has not been read yet. Read it first before writing to it.",
+            })
+        try:
+            disk_mtime = os.path.getmtime(abs_path)
+            if disk_mtime > cached.mtime:
+                return ToolResult(data={
+                    "type": "error",
+                    "content": (
+                        "File has been externally modified since last read. "
+                        "Read it again before writing."
+                    ),
+                })
+        except OSError:
+            pass
+
     try:
-        chars = await asyncio.to_thread(_write_sync, file_path, content)
+        chars = await asyncio.to_thread(_write_sync, abs_path, content)
     except Exception as e:
         return ToolResult(data={
             "type": "error",
             "content": f"Error writing file: {e}",
         })
+
+    # --- update cache: record written content + new mtime ---
+    if cache:
+        try:
+            mtime = os.path.getmtime(abs_path)
+        except OSError:
+            mtime = 0.0
+        cache.set(abs_path, FileState(
+            content=content,
+            mtime=mtime,
+            offset=None,
+            limit=None,
+        ))
 
     return ToolResult(data={
         "type": "success",

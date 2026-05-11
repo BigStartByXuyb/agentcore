@@ -115,7 +115,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             mtime = os.path.getmtime(abs_path)
         except OSError:
             mtime = 0.0
-        cache.set(abs_path, FileState(mtime=mtime, offset=offset, limit=limit))
+        cache.set(abs_path, FileState(content=content, mtime=mtime, offset=offset, limit=limit))
 
     return ToolResult(data={
         "type": "text",

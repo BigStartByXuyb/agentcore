@@ -8,6 +8,72 @@ import os
 from src.types import ToolResult, ToolDef, ToolUseContext
 from src.file_state_cache import FileState
 
+# --- quote normalization (matches Claude Code FileEditTool/utils.ts) ---
+
+_CURLY_QUOTE_MAP = str.maketrans({
+    '‘': "'",   # left single curly  → straight
+    '’': "'",   # right single curly → straight
+    '“': '"',   # left double curly  → straight
+    '”': '"',   # right double curly → straight
+})
+
+
+def _normalize_quotes(s: str) -> str:
+    return s.translate(_CURLY_QUOTE_MAP)
+
+
+def _find_actual_string(file_content: str, search: str) -> str | None:
+    """Find *search* in *file_content*, tolerating curly/straight quote mismatch.
+
+    Returns the actual substring from file_content (with original quotes intact),
+    or None if not found even after normalization.
+    """
+    if search in file_content:
+        return search
+
+    norm_search = _normalize_quotes(search)
+    norm_file = _normalize_quotes(file_content)
+    pos = norm_file.find(norm_search)
+    if pos != -1:
+        return file_content[pos: pos + len(search)]
+
+    return None
+
+
+def _is_opening_context(chars: list[str], index: int) -> bool:
+    if index == 0:
+        return True
+    prev = chars[index - 1]
+    return prev in (' ', '\t', '\n', '\r', '(', '[', '{', '—', '–')
+
+
+def _preserve_quote_style(old_string: str, actual_old: str, new_string: str) -> str:
+    """If old_string matched via normalization, apply the file's curly quote style to new_string."""
+    if old_string == actual_old:
+        return new_string
+
+    has_double = '“' in actual_old or '”' in actual_old
+    has_single = '‘' in actual_old or '’' in actual_old
+
+    if not has_double and not has_single:
+        return new_string
+
+    chars = list(new_string)
+    result: list[str] = []
+    for i, c in enumerate(chars):
+        if c == '"' and has_double:
+            result.append('“' if _is_opening_context(chars, i) else '”')
+        elif c == "'" and has_single:
+            prev_is_letter = i > 0 and chars[i - 1].isalpha()
+            next_is_letter = i < len(chars) - 1 and chars[i + 1].isalpha()
+            if prev_is_letter and next_is_letter:
+                result.append('’')  # contraction: don't → don't
+            else:
+                result.append('‘' if _is_opening_context(chars, i) else '’')
+        else:
+            result.append(c)
+    return ''.join(result)
+
 SCHEMA: dict = {
     "name": "edit_file",
     "description": (
@@ -130,14 +196,22 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     except Exception as e:
         return ToolResult(data={"type": "error", "content": f"Error reading file: {e}"})
 
-    # --- find matches ---
+    # --- find matches (with quote normalization fallback) ---
     match_count = original.count(old_string)
+    actual_old = old_string
+    quote_normalized = False
 
     if match_count == 0:
-        return ToolResult(data={
-            "type": "error",
-            "content": f"old_string not found in file.\nString: {old_string}",
-        })
+        found = _find_actual_string(original, old_string)
+        if found is None:
+            return ToolResult(data={
+                "type": "error",
+                "content": f"old_string not found in file.\nString: {old_string}",
+            })
+        actual_old = found
+        match_count = original.count(actual_old)
+        new_string = _preserve_quote_style(old_string, actual_old, new_string)
+        quote_normalized = True
 
     if match_count > 1 and not replace_all:
         return ToolResult(data={
@@ -151,9 +225,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     # --- apply replacement ---
     if replace_all:
-        updated = original.replace(old_string, new_string)
+        updated = original.replace(actual_old, new_string)
     else:
-        updated = original.replace(old_string, new_string, 1)
+        updated = original.replace(actual_old, new_string, 1)
 
     # --- write back ---
     try:
@@ -180,6 +254,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         "replacements": replacements,
         "old_lines": old_lines,
         "new_lines": new_lines,
+        "quote_normalized": quote_normalized,
     })
 
 
@@ -191,10 +266,13 @@ def map_result(data: dict) -> str:
         return f"Created new file: {data['file_path']}"
 
     r = data["replacements"]
-    return (
+    msg = (
         f"Replaced {r} occurrence{'s' if r > 1 else ''} in {data['file_path']} "
         f"({data['old_lines']} lines → {data['new_lines']} lines)"
     )
+    if data.get("quote_normalized"):
+        msg += " [quote-normalized: curly/straight quotes were auto-converted to match file style]"
+    return msg
 
 
 def is_read_only(_inputs: dict) -> bool:

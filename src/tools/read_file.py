@@ -58,6 +58,7 @@ def _read_lines_sync(file_path: str) -> list[str]:
 
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     file_path: str = inputs["file_path"]
+    explicit_range = "offset" in inputs or "limit" in inputs
     offset: int = inputs.get("offset", 0)
     limit: int = inputs.get("limit", DEFAULT_LIMIT)
 
@@ -78,7 +79,6 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         })
 
     # --- file size gate (only for full reads without explicit offset/limit) ---
-    explicit_range = "offset" in inputs or "limit" in inputs
     if not explicit_range:
         try:
             file_size = os.path.getsize(abs_path)
@@ -97,13 +97,19 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             pass
 
     # --- dedup check ---
+    # Cache stores offset=None, limit=None for default reads and edit/write.
+    # Dedup only triggers when both the cached and current request match:
+    #   - Both are explicit-range reads with same offset+limit, OR
+    #   - Both are default reads (offset=None in cache, explicit_range=False now)
+    # After edit/write (offset=None), dedup is skipped because mtime changes.
     cache = context.file_state_cache
-    if cache:
+    cache_offset = offset if explicit_range else None
+    cache_limit = limit if explicit_range else None
+    if cache is not None:
         cached = cache.get(abs_path)
         if (cached
-                and cached.offset is not None
-                and cached.offset == offset
-                and cached.limit == limit):
+                and cached.offset == cache_offset
+                and cached.limit == cache_limit):
             try:
                 current_mtime = os.path.getmtime(abs_path)
                 if current_mtime == cached.mtime:
@@ -147,12 +153,12 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     truncated = (offset + limit) < total_lines
 
     # --- update cache ---
-    if cache:
+    if cache is not None:
         try:
             mtime = os.path.getmtime(abs_path)
         except OSError:
             mtime = 0.0
-        cache.set(abs_path, FileState(content=content, mtime=mtime, offset=offset, limit=limit))
+        cache.set(abs_path, FileState(content=content, mtime=mtime, offset=cache_offset, limit=cache_limit))
 
     return ToolResult(data={
         "type": "text",

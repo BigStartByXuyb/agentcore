@@ -73,7 +73,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
                 await asyncio.to_thread(_write_file_sync, abs_path, new_string)
             except Exception as e:
                 return ToolResult(data={"type": "error", "content": f"Error creating file: {e}"})
-            if cache:
+            if cache is not None:
                 try:
                     mtime = os.path.getmtime(abs_path)
                 except OSError:
@@ -90,7 +90,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         })
 
     # --- stale check ---
-    if cache:
+    if cache is not None:
         cached = cache.get(abs_path)
         if not cached or cached.isPartialView:
             return ToolResult(data={
@@ -162,7 +162,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         return ToolResult(data={"type": "error", "content": f"Error writing file: {e}"})
 
     # --- update cache ---
-    if cache:
+    if cache is not None:
         try:
             mtime = os.path.getmtime(abs_path)
         except OSError:

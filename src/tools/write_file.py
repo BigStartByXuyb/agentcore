@@ -47,7 +47,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     cache = context.file_state_cache
 
     # --- stale check: reject if file was externally modified since last read ---
-    if cache and os.path.exists(abs_path):
+    if cache is not None and os.path.exists(abs_path):
         cached = cache.get(abs_path)
         if not cached or cached.isPartialView:
             return ToolResult(data={
@@ -86,7 +86,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         })
 
     # --- update cache: record written content + new mtime ---
-    if cache:
+    if cache is not None:
         try:
             mtime = os.path.getmtime(abs_path)
         except OSError:

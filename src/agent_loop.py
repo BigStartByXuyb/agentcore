@@ -208,11 +208,19 @@ async def run_agent_loop(
         # --- Auto Compact: full LLM summarization if near context limit ---
         if should_auto_compact(estimate_token_count(history, _state)):
             cache = tool_use_context.file_state_cache
-            file_snapshot = cache.snapshot() if cache else {}
+            file_snapshot = cache.snapshot() if cache is not None else {}
             if await auto_compact(history):
-                if cache:
+                if cache is not None:
                     cache.clear()
                 _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+
+        # --- Changed files: detect external modifications and inject diffs ---
+        cache = tool_use_context.file_state_cache
+        changed_atts = cache.get_changed_files() if cache is not None else []
+        if changed_atts:
+            last_user = history.last_user_message()
+            if last_user is not None:
+                last_user.attach(changed_atts)
 
         tools = build_tool_schemas(
             tool_registry,
@@ -254,9 +262,9 @@ async def run_agent_loop(
             if _is_prompt_too_long(api_error):
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
                 cache = tool_use_context.file_state_cache
-                file_snapshot = cache.snapshot() if cache else {}
+                file_snapshot = cache.snapshot() if cache is not None else {}
                 if await auto_compact(history):
-                    if cache:
+                    if cache is not None:
                         cache.clear()
                     _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
                     continue

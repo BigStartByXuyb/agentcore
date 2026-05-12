@@ -433,6 +433,7 @@ class ToolDef:
         schema: dict,
         executor: Callable[[dict, ToolUseContext], ToolExecutorReturn],
         map_result: Callable[[Any], str],
+        display_result: Callable[[Any], str] | None = None,
         is_enabled: Callable[[], bool] | None = None,
         is_read_only: Callable[[dict], bool] | None = None,
         is_destructive: Callable[[dict], bool] | None = None,
@@ -441,6 +442,7 @@ class ToolDef:
         self.schema = schema
         self.executor = executor
         self.map_result = map_result
+        self.display_result = display_result
         self.is_enabled = is_enabled or (lambda: True)
         self.is_read_only = is_read_only or (lambda _: False)
         self.is_destructive = is_destructive or (lambda _: False)

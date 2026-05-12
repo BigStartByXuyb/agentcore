@@ -102,13 +102,47 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         "type": "success",
         "file_path": file_path,
         "chars_written": chars,
+        "content_preview": _make_preview(content),
     })
+
+
+_PREVIEW_MAX_LINES = 5
+_PREVIEW_MAX_LINE_CHARS = 120
+
+
+def _make_preview(content: str) -> str:
+    lines = content.splitlines()
+    kept = []
+    for line in lines[:_PREVIEW_MAX_LINES]:
+        if len(line) > _PREVIEW_MAX_LINE_CHARS:
+            kept.append(line[:_PREVIEW_MAX_LINE_CHARS] + "...")
+        else:
+            kept.append(line)
+    remaining = len(lines) - len(kept)
+    if remaining > 0:
+        kept.append(f"... ({remaining} more lines)")
+    return "\n".join(kept)
 
 
 def map_result(data: dict) -> str:
     if data.get("type") == "error":
         return data["content"]
     return f"Wrote {data['chars_written']} chars to {data['file_path']}"
+
+
+def display_result(data: dict) -> str:
+    if data.get("type") == "error":
+        return ""
+
+    header = map_result(data)
+    preview = data.get("content_preview", "")
+    if not preview:
+        return header
+
+    parts = [header, ""]
+    for line in preview.splitlines():
+        parts.append(f"  {line}")
+    return "\n".join(parts)
 
 
 def is_read_only(inputs: dict) -> bool:
@@ -119,5 +153,6 @@ tool = ToolDef(
     schema=SCHEMA,
     executor=executor,
     map_result=map_result,
+    display_result=display_result,
     is_read_only=is_read_only,
 )

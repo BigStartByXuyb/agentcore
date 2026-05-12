@@ -65,8 +65,12 @@ def default_handler(event: AgentEvent) -> None:
 
     elif isinstance(event, ToolEnd):
         status = "error" if event.is_error else "ok"
-        summary = event.result_summary[:80] if event.result_summary else ""
-        print(f"\n  [{label}:tool-end] {event.tool_name} [{status}] {summary}")
+        if event.display_text:
+            print(f"\n  [{label}:tool-end] {event.tool_name} [{status}]")
+            print(event.display_text)
+        else:
+            summary = event.result_summary[:80] if event.result_summary else ""
+            print(f"\n  [{label}:tool-end] {event.tool_name} [{status}] {summary}")
 
     elif isinstance(event, ErrorEvent):
         print(f"\n  [{label}:error] {event.error_text[:120]}")

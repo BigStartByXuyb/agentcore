@@ -119,7 +119,14 @@ async def run_tool_use(
         on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=error_text))
         return (ToolResult(data=None), id, error_text, True)
 
-    on_event(ToolEnd(label=label, is_error=False, tool_name=tool_name, result_summary=llm_text))
+    display_text = ""
+    if tool.display_result is not None:
+        try:
+            display_text = tool.display_result(result.data)
+        except Exception:
+            display_text = ""
+
+    on_event(ToolEnd(label=label, is_error=False, tool_name=tool_name, result_summary=llm_text, display_text=display_text))
     return (result, id, llm_text, False)
 
 

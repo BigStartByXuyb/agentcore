@@ -255,6 +255,8 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         "old_lines": old_lines,
         "new_lines": new_lines,
         "quote_normalized": quote_normalized,
+        "old_snippet": _make_snippet(old_string),
+        "new_snippet": _make_snippet(new_string),
     })
 
 
@@ -275,6 +277,44 @@ def map_result(data: dict) -> str:
     return msg
 
 
+_SNIPPET_MAX_LINES = 5
+_SNIPPET_MAX_LINE_CHARS = 120
+
+
+def _make_snippet(text: str) -> str:
+    lines = text.splitlines()
+    kept = []
+    for line in lines[:_SNIPPET_MAX_LINES]:
+        if len(line) > _SNIPPET_MAX_LINE_CHARS:
+            kept.append(line[:_SNIPPET_MAX_LINE_CHARS] + "...")
+        else:
+            kept.append(line)
+    remaining = len(lines) - len(kept)
+    if remaining > 0:
+        kept.append(f"... ({remaining} more lines)")
+    return "\n".join(kept)
+
+
+def display_result(data: dict) -> str:
+    if data.get("type") == "error":
+        return ""
+    if data.get("status") == "created":
+        return ""
+
+    header = map_result(data)
+    old_snippet = data.get("old_snippet", "")
+    new_snippet = data.get("new_snippet", "")
+    if not old_snippet and not new_snippet:
+        return header
+
+    parts = [header, ""]
+    for line in old_snippet.splitlines():
+        parts.append(f"  - {line}")
+    for line in new_snippet.splitlines():
+        parts.append(f"  + {line}")
+    return "\n".join(parts)
+
+
 def is_read_only(_inputs: dict) -> bool:
     return False
 
@@ -283,5 +323,6 @@ tool = ToolDef(
     schema=SCHEMA,
     executor=executor,
     map_result=map_result,
+    display_result=display_result,
     is_read_only=is_read_only,
 )

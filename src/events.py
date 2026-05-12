@@ -71,6 +71,7 @@ class ToolEnd(AgentEvent):
     tool_name: str
     is_error: bool = False
     result_summary: str = ""
+    display_text: str = ""
 
 
 # ---------------------------------------------------------------------------

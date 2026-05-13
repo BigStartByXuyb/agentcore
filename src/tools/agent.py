@@ -185,7 +185,7 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
             msg.attach(attachments)
 
     # --- Sub-agent context ---
-    from src.file_state_cache import FileStateCache
+    from src.utils.file_state_cache import FileStateCache
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,

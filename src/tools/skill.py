@@ -230,7 +230,7 @@ async def _execute_fork(
         if attachments:
             msg.attach(attachments)
 
-    from src.file_state_cache import FileStateCache
+    from src.utils.file_state_cache import FileStateCache
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,

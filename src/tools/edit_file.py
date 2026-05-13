@@ -6,7 +6,7 @@ import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
-from src.file_state_cache import FileState
+from src.utils.file_state_cache import FileState
 
 # --- quote normalization (matches Claude Code FileEditTool/utils.ts) ---
 
@@ -107,14 +107,9 @@ SCHEMA: dict = {
 }
 
 
-def _read_file_sync(file_path: str) -> str:
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-        return f.read()
-
-
-def _write_file_sync(file_path: str, content: str) -> None:
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
+def _write_file_sync(file_path: str, content: str, encoding: str = "utf-8", line_endings: str = "LF") -> None:
+    from src.utils.file_encoding import write_text_content
+    write_text_content(file_path, content, encoding, line_endings)
 
 
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
@@ -155,6 +150,15 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "content": f"File not found: {file_path}",
         })
 
+    # --- read current content (single read for both stale check and replacement) ---
+    try:
+        from src.utils.file_encoding import read_file_with_metadata
+        original, file_encoding, file_line_endings = await asyncio.to_thread(
+            read_file_with_metadata, abs_path,
+        )
+    except Exception as e:
+        return ToolResult(data={"type": "error", "content": f"Error reading file: {e}"})
+
     # --- stale check ---
     if cache is not None:
         cached = cache.get(abs_path)
@@ -168,16 +172,8 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             if disk_mtime > cached.mtime:
                 is_full_read = cached.offset is None and cached.limit is None
                 if is_full_read:
-                    try:
-                        disk_content = await asyncio.to_thread(_read_file_sync, abs_path)
-                        if disk_content == cached.content:
-                            pass  # content unchanged, safe to proceed
-                        else:
-                            return ToolResult(data={
-                                "type": "error",
-                                "content": "File has been externally modified since last read. Read it again before editing.",
-                            })
-                    except Exception:
+                    disk_content = "\n".join(original.splitlines())
+                    if disk_content != cached.content:
                         return ToolResult(data={
                             "type": "error",
                             "content": "File has been externally modified since last read. Read it again before editing.",
@@ -189,12 +185,6 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
                     })
         except OSError:
             pass
-
-    # --- read current content ---
-    try:
-        original = await asyncio.to_thread(_read_file_sync, abs_path)
-    except Exception as e:
-        return ToolResult(data={"type": "error", "content": f"Error reading file: {e}"})
 
     # --- find matches (with quote normalization fallback) ---
     match_count = original.count(old_string)
@@ -229,9 +219,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     else:
         updated = original.replace(actual_old, new_string, 1)
 
-    # --- write back ---
+    # --- write back (preserve original encoding + line endings) ---
     try:
-        await asyncio.to_thread(_write_file_sync, abs_path, updated)
+        await asyncio.to_thread(_write_file_sync, abs_path, updated, file_encoding, file_line_endings)
     except Exception as e:
         return ToolResult(data={"type": "error", "content": f"Error writing file: {e}"})
 

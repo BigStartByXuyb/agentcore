@@ -19,7 +19,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from src import config
 from src.agent_loop import agent_loop
 from src.types import AgentState, MessageHistory
-from src.file_state_cache import FileStateCache
+from src.utils.file_state_cache import FileStateCache
 from src.mcp_tool import register_mcp_tools
 from src.tools import registry as tool_registry
 from src.watcher import start_watchers

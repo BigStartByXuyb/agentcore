@@ -6,7 +6,7 @@ import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
-from src.file_state_cache import FileState
+from src.utils.file_state_cache import FileState
 
 SCHEMA: dict = {
     "name": "write_file",
@@ -31,11 +31,11 @@ SCHEMA: dict = {
 }
 
 
-def _write_sync(file_path: str, content: str) -> int:
+def _write_sync(file_path: str, content: str, encoding: str = "utf-8") -> int:
     """Blocking I/O helper — returns bytes written."""
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    from src.utils.file_encoding import write_text_content
+    write_text_content(file_path, content, encoding, "LF")
     return len(content)
 
 
@@ -61,8 +61,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
                 content_unchanged = False
                 if is_full_read:
                     try:
-                        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-                            disk_content = f.read()
+                        from src.utils.file_encoding import read_file_streaming
+                        lines, _, _ = read_file_streaming(abs_path)
+                        disk_content = "\n".join(lines)
                         content_unchanged = disk_content == cached.content
                     except Exception:
                         pass
@@ -77,8 +78,15 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         except OSError:
             pass
 
+    # Preserve encoding if overwriting an existing file (e.g. UTF-16 LE stays UTF-16 LE).
+    # New files default to UTF-8.
+    enc = "utf-8"
+    if os.path.isfile(abs_path):
+        from src.utils.file_encoding import detect_encoding
+        enc = await asyncio.to_thread(detect_encoding, abs_path)
+
     try:
-        chars = await asyncio.to_thread(_write_sync, abs_path, content)
+        chars = await asyncio.to_thread(_write_sync, abs_path, content, enc)
     except Exception as e:
         return ToolResult(data={
             "type": "error",

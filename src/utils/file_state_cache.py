@@ -113,8 +113,20 @@ class FileStateCache:
             if disk_mtime <= state.mtime:
                 continue
 
-            new_content = _read_file(path)
-            if new_content is None:
+            try:
+                from src.utils.file_encoding import read_file_streaming
+                lines, _, _ = read_file_streaming(path)
+                new_content = "\n".join(lines)
+            except Exception:
+                self.delete(path)
+                text = (
+                    f"<system-reminder>\n"
+                    f"Note: {path} was modified, either by the user or by a linter. "
+                    f"Failed to read the file for diff. "
+                    f"Read the file again to see the current content.\n"
+                    f"</system-reminder>"
+                )
+                attachments.append(Attachment(type="system_reminder", content=text))
                 continue
 
             snippet = _compute_diff_snippet(state.content, new_content)
@@ -151,12 +163,6 @@ class FileStateCache:
 # Module-private helpers
 # ----------------------------------------------------------------------
 
-def _read_file(path: str) -> str | None:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except Exception:
-        return None
 
 
 def _compute_diff_snippet(old_content: str, new_content: str) -> str:

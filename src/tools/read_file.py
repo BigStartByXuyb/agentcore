@@ -1,4 +1,10 @@
-"""Read file tool — read file contents with line numbers (async)."""
+"""Read file tool — read file contents with line numbers (async).
+
+Encoding detection: auto-detect UTF-16 LE (BOM) vs UTF-8 (default).
+Line endings: CRLF normalized to LF on read; original style recorded for edit write-back.
+Large files: streaming line-by-line read — only requested range held in memory.
+Special files: pipes, devices, sockets blocked to prevent hangs.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,12 @@ import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
-from src.file_state_cache import FileState
+from src.utils.file_state_cache import FileState
+from src.utils.file_encoding import (
+    is_blocked_path,
+    is_special_file,
+    read_file_streaming,
+)
 from src import config
 
 SCHEMA: dict = {
@@ -32,7 +43,8 @@ SCHEMA: dict = {
             "limit": {
                 "type": "integer",
                 "description": (
-                    "Maximum number of lines to read. Defaults to 2000."
+                    "Maximum number of lines to read. "
+                    "Only provide if the file is too large to read at once."
                 ),
             },
         },
@@ -40,9 +52,9 @@ SCHEMA: dict = {
     },
 }
 
-DEFAULT_LIMIT = 2000
-MAX_FILE_SIZE_BYTES = 256 * 1024  # 256 KB — reject full-read if file exceeds this
+MAX_READ_BYTES = 256 * 1024       # 256 KB — byte budget for selected output
 MAX_OUTPUT_TOKENS = 25_000        # single read token budget
+
 
 FILE_UNCHANGED_STUB = (
     "File unchanged since last read. "
@@ -50,19 +62,19 @@ FILE_UNCHANGED_STUB = (
 )
 
 
-def _read_lines_sync(file_path: str) -> list[str]:
-    """Blocking I/O helper — called via asyncio.to_thread."""
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-        return f.readlines()
-
-
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     file_path: str = inputs["file_path"]
-    explicit_range = "offset" in inputs or "limit" in inputs
-    offset: int = inputs.get("offset", 0)
-    limit: int = inputs.get("limit", DEFAULT_LIMIT)
-
+    offset: int | None = inputs.get("offset", None)
+    limit: int | None = inputs.get("limit", None)
     abs_path = os.path.normpath(os.path.abspath(file_path))
+
+    # --- blocked device/pipe paths (no I/O, just path check) ---
+    if is_blocked_path(abs_path):
+        return ToolResult(data={
+            "type": "error",
+            "content": f"Cannot read '{file_path}': this device file would block or produce infinite output.",
+            "total_lines": 0,
+        })
 
     if not os.path.exists(abs_path):
         return ToolResult(data={
@@ -78,38 +90,21 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "total_lines": 0,
         })
 
-    # --- file size gate (only for full reads without explicit offset/limit) ---
-    if not explicit_range:
-        try:
-            file_size = os.path.getsize(abs_path)
-            if file_size > MAX_FILE_SIZE_BYTES:
-                return ToolResult(data={
-                    "type": "error",
-                    "content": (
-                        f"File content ({file_size:,} bytes) exceeds maximum allowed size "
-                        f"({MAX_FILE_SIZE_BYTES:,} bytes). "
-                        "Use offset and limit parameters to read specific portions of the file, "
-                        "or use grep to search for specific content instead of reading the whole file."
-                    ),
-                    "total_lines": 0,
-                })
-        except OSError:
-            pass
+    # --- special file check (FIFO, socket, device) ---
+    if is_special_file(abs_path):
+        return ToolResult(data={
+            "type": "error",
+            "content": f"Cannot read '{file_path}': special file (pipe/socket/device) may block or produce infinite output.",
+            "total_lines": 0,
+        })
 
     # --- dedup check ---
-    # Cache stores offset=None, limit=None for default reads and edit/write.
-    # Dedup only triggers when both the cached and current request match:
-    #   - Both are explicit-range reads with same offset+limit, OR
-    #   - Both are default reads (offset=None in cache, explicit_range=False now)
-    # After edit/write (offset=None), dedup is skipped because mtime changes.
     cache = context.file_state_cache
-    cache_offset = offset if explicit_range else None
-    cache_limit = limit if explicit_range else None
     if cache is not None:
         cached = cache.get(abs_path)
         if (cached
-                and cached.offset == cache_offset
-                and cached.limit == cache_limit):
+                and cached.offset == offset
+                and cached.limit == limit):
             try:
                 current_mtime = os.path.getmtime(abs_path)
                 if current_mtime == cached.mtime:
@@ -117,9 +112,34 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             except OSError:
                 pass
 
-    # --- normal read ---
+    # --- large file rejection (full read only, matches Claude Code behavior) ---
+    is_full_read = offset is None and limit is None
+    if is_full_read:
+        try:
+            file_size = os.path.getsize(abs_path)
+            if file_size > MAX_READ_BYTES:
+                return ToolResult(data={
+                    "type": "error",
+                    "content": (
+                        f"File is too large to read entirely "
+                        f"({file_size:,} bytes, limit is {MAX_READ_BYTES // 1024} KB). "
+                        "Use offset and limit to read specific portions of the file, "
+                        "or use grep to search for specific content."
+                    ),
+                    "total_lines": 0,
+                })
+        except OSError:
+            pass
+
+    # --- read file content ---
+    actual_offset = offset if offset is not None else 0
+
     try:
-        all_lines = await asyncio.to_thread(_read_lines_sync, abs_path)
+        selected, total_lines, _ = (
+            await asyncio.to_thread(
+                read_file_streaming, abs_path, actual_offset, limit,
+            )
+        )
     except Exception as e:
         return ToolResult(data={
             "type": "error",
@@ -127,13 +147,12 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "total_lines": 0,
         })
 
-    total_lines = len(all_lines)
-    selected = all_lines[offset : offset + limit]
+    cache_content = "\n".join(selected)
 
+    # --- format with line numbers (for LLM display) ---
     numbered = []
-    for i, line in enumerate(selected, start=offset + 1):
-        numbered.append(f"{i}\t{line.rstrip()}")
-
+    for i, line in enumerate(selected, start=actual_offset + 1):
+        numbered.append(f"{i}\t{line}")
     content = "\n".join(numbered)
 
     # --- output token estimate gate ---
@@ -150,7 +169,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "total_lines": total_lines,
         })
 
-    truncated = (offset + limit) < total_lines
+    truncated = limit is not None and (actual_offset + limit) < total_lines
 
     # --- update cache ---
     if cache is not None:
@@ -158,15 +177,15 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             mtime = os.path.getmtime(abs_path)
         except OSError:
             mtime = 0.0
-        cache.set(abs_path, FileState(content=content, mtime=mtime, offset=cache_offset, limit=cache_limit))
+        cache.set(abs_path, FileState(content=cache_content, mtime=mtime, offset=offset, limit=limit))
 
     return ToolResult(data={
         "type": "text",
         "content": content,
         "total_lines": total_lines,
         "truncated": truncated,
-        "start_line": offset + 1,
-        "end_line": offset + len(selected),
+        "start_line": actual_offset + 1,
+        "end_line": actual_offset + len(selected),
     })
 
 
@@ -181,10 +200,12 @@ def map_result(data: dict) -> str:
     if not content:
         return "(empty file)"
 
+    total = data["total_lines"]
+    end = data["end_line"]
+    remaining = total - end
+
     if data.get("truncated"):
-        total = data["total_lines"]
-        end = data["end_line"]
-        content += f"\n\n... ({total - end} more lines remaining. Use offset to read more.)"
+        content += f"\n\n... ({remaining} more lines remaining. Use offset to read more.)"
 
     return content
 

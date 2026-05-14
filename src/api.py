@@ -117,7 +117,7 @@ def create_stream_with_retry(
             final = await stream.get_final_message()
     """
     adapter = get_provider(config.PROVIDER)
-    print(f"msg:{messages}\n")
+    #print(f"msg:{messages}\n")
     return adapter.stream_message(
         messages=messages,
         system=system,

@@ -78,8 +78,11 @@ def _build_invoked_skills_attachment(
         content = sk.content
         tokens = config.estimate_tokens(content)
         if tokens > POST_COMPACT_MAX_TOKENS_PER_SKILL:
-            ratio = POST_COMPACT_MAX_TOKENS_PER_SKILL / tokens
-            content = content[: int(len(content) * ratio)]
+            char_budget = config.tokens_to_chars(POST_COMPACT_MAX_TOKENS_PER_SKILL)
+            content = content[:char_budget] + (
+                "\n\n[... skill content truncated for compaction; "
+                f"use Read on the skill path ({sk.skill_path}) if you need the full text]"
+            )
             tokens = POST_COMPACT_MAX_TOKENS_PER_SKILL
         if used_tokens + tokens > POST_COMPACT_SKILLS_TOKEN_BUDGET:
             break

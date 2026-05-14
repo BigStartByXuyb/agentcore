@@ -46,6 +46,11 @@ def estimate_tokens(text: str) -> int:
     return len(text.encode("utf-8")) // BYTES_PER_TOKEN
 
 
+def tokens_to_chars(tokens: int) -> int:
+    """Reverse of estimate_tokens: approximate character budget for a token limit."""
+    return tokens * BYTES_PER_TOKEN
+
+
 # Sandbox (bash command isolation via bubblewrap)
 SANDBOX_ENABLED: bool = True
 SANDBOX_ALLOW_WRITE: list[str] = []           # additional writable paths (project dir + /tmp always allowed)

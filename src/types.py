@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -81,7 +82,7 @@ ContentBlock = TextContent | ToolUseContent | ToolResultContent | ThinkingConten
 # Attachment — metadata attached to a Message
 # ---------------------------------------------------------------------------
 
-AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index", "invoked_skills"]
+AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index", "invoked_skills", "plan_mode"]
 
 
 @dataclass
@@ -354,6 +355,8 @@ class ToolUseContext:
     # --- session-level caches (cleared on /clear, consumed by compaction) ---
     file_state_cache: Any | None = None                                # FileStateCache instance
     invoked_skills: dict[str, "InvokedSkillInfo"] = field(default_factory=dict)  # inline skills active this session
+    # --- agent state back-reference ---
+    agent_state: "AgentState | None" = None # back-reference so tools (e.g. ExitPlanMode) can read/mutate state
 
 
 @dataclass
@@ -382,6 +385,22 @@ ToolExecutorReturn = Awaitable[ToolResult]
 
 
 @dataclass
+class ToolPermissionResult:
+    """Unified permission decision — used by both tool-level and engine-level checks.
+
+    Behaviors:
+      - allow:       proceed to executor
+      - ask:         needs user confirmation (with optional custom_prompt)
+      - deny:        reject this invocation
+      - passthrough: defer to PermissionEngine rules (default for most tools)
+    """
+    behavior: Literal["allow", "deny", "ask", "passthrough"]
+    custom_prompt: str | None = None
+    deny_message: str = ""
+    engine_content: str | None = None
+
+
+@dataclass
 class InvokedSkillInfo:
     """Tracks an inline skill invoked during this session.
 
@@ -395,6 +414,22 @@ class InvokedSkillInfo:
     invoked_at: float = field(default_factory=time.time)
 
 
+class PlanPhase(str, Enum):
+    """Plan mode lifecycle — single state variable, no illegal combinations.
+
+    INACTIVE → ACTIVE → EXITING → INACTIVE
+                 ↑          ↓ (rejected via permission system)
+                 └──────────┘
+
+    Approval is handled mid-turn by the permission system (check_permissions
+    on ExitPlanMode returns "ask"). On rejection, the tool never executes and
+    the LLM receives an error tool_result with user feedback.
+    """
+    INACTIVE = "inactive"
+    ACTIVE = "active"
+    EXITING = "exiting"
+
+
 @dataclass
 class AgentState:
     """Statistics maintained by the agent loop (not exposed to tools)."""
@@ -406,6 +441,8 @@ class AgentState:
     total_thinking_tokens: int = 0
     last_usage_tokens: int = 0
     messages_since_last_usage: int = 0
+    plan_phase: PlanPhase = PlanPhase.INACTIVE
+    plan_file_path: str | None = None
 
 
 class ToolDef:
@@ -425,6 +462,7 @@ class ToolDef:
     is_enabled: Callable[[], bool]
     is_read_only: Callable[[dict], bool]
     is_destructive: Callable[[dict], bool]
+    check_permissions: Callable[[dict, ToolUseContext], "ToolPermissionResult"]
     max_result_size_chars: int
 
     def __init__(
@@ -437,6 +475,7 @@ class ToolDef:
         is_enabled: Callable[[], bool] | None = None,
         is_read_only: Callable[[dict], bool] | None = None,
         is_destructive: Callable[[dict], bool] | None = None,
+        check_permissions: Callable[[dict, ToolUseContext], "ToolPermissionResult"] | None = None,
         max_result_size_chars: int = 30_000,
     ) -> None:
         self.schema = schema
@@ -446,6 +485,9 @@ class ToolDef:
         self.is_enabled = is_enabled or (lambda: True)
         self.is_read_only = is_read_only or (lambda _: False)
         self.is_destructive = is_destructive or (lambda _: False)
+        self.check_permissions = check_permissions or (
+            lambda _inputs, _ctx: ToolPermissionResult(behavior="passthrough")
+        )
         self.max_result_size_chars = max_result_size_chars
 
     @property

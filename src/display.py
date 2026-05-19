@@ -116,14 +116,31 @@ def make_interactive_handler(
     def handler(event: AgentEvent) -> None:
         if isinstance(event, PermissionRequest) and event.future is not None:
             if interactive:
-                summary = _summarize_input(event.tool_input)
-                prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
+                if event.custom_prompt:
+                    async def _resolve_custom() -> None:
+                        answer = await asyncio.to_thread(input, event.custom_prompt)
+                        answer = answer.strip().lower()
+                        if answer in ("y", "yes"):
+                            event.future.set_result("y")
+                        else:
+                            feedback = await asyncio.to_thread(
+                                input, "  Feedback (press Enter to skip): "
+                            )
+                            feedback = feedback.strip()
+                            if feedback:
+                                event.future.set_result(f"n:{feedback}")
+                            else:
+                                event.future.set_result("n")
+                    asyncio.create_task(_resolve_custom())
+                else:
+                    summary = _summarize_input(event.tool_input)
+                    prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
 
-                async def _resolve() -> None:
-                    answer = await asyncio.to_thread(input, prompt)
-                    event.future.set_result(answer.strip().lower())
+                    async def _resolve() -> None:
+                        answer = await asyncio.to_thread(input, prompt)
+                        event.future.set_result(answer.strip().lower())
 
-                asyncio.create_task(_resolve())
+                    asyncio.create_task(_resolve())
             else:
                 event.future.set_result("n")
         else:

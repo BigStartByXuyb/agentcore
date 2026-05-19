@@ -231,6 +231,7 @@ async def _execute_fork(
             msg.attach(attachments)
 
     from src.utils.file_state_cache import FileStateCache
+    label = f"fork:{skill.name}"
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
@@ -239,11 +240,8 @@ async def _execute_fork(
         permissions=context.permissions.as_silent() if context.permissions else None,
         on_event=context.on_event,
         file_state_cache=FileStateCache(),
+        agent_state=AgentState(agent_id=label),
     )
-
-    sub_state = AgentState(agent_id=f"fork:{skill.name}")
-    label = f"fork:{skill.name}"
-    on_event = context.on_event
 
     try:
         from src.agent_loop import run_agent_loop
@@ -252,9 +250,8 @@ async def _execute_fork(
             system_prompt=sub_system_prompt,
             tool_use_context=sub_context,
             max_turns=config.MAX_TURNS,
-            state=sub_state,
             label=label,
-            on_event=on_event,
+            on_event=context.on_event,
         )
     except Exception as e:
         return ToolResult(data={
@@ -267,7 +264,7 @@ async def _execute_fork(
         "success": True,
         "commandName": skill.name,
         "status": "forked",
-        "agentId": sub_state.agent_id,
+        "agentId": sub_context.agent_state.agent_id,
         "result": result_text,
     })
 

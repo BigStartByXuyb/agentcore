@@ -314,9 +314,8 @@ class TestAgentLoopApiErrorRecovery:
         history = MessageHistory([Message(role="user", content="hello")])
         result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tool_use_context=ToolUseContext(messages=history, tools=[]),
+            tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
             max_turns=3,
-            state=AgentState(agent_id="test"),
             label="test",
             on_event=lambda _: None,
         ))
@@ -335,9 +334,8 @@ class TestAgentLoopApiErrorRecovery:
         history = MessageHistory([Message(role="user", content="test")])
         result = asyncio.run(run_agent_loop(
             system_prompt="test",
-            tool_use_context=ToolUseContext(messages=history, tools=[]),
+            tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
             max_turns=10,
-            state=AgentState(agent_id="test"),
             label="test",
             on_event=lambda _: None,
         ))

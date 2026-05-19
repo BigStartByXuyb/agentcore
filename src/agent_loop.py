@@ -173,7 +173,6 @@ async def run_agent_loop(
     system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
-    state: AgentState | None = None,
     label: str = "main",
     stream: bool = False,
     thinking: dict | None = None,
@@ -184,8 +183,10 @@ async def run_agent_loop(
 
     Emits AgentEvent objects via on_event callback.
     Returns the final assistant text.
+
+    The caller must set tool_use_context.agent_state before calling.
     """
-    _state = state or AgentState(agent_id=label)
+    _state = tool_use_context.agent_state or AgentState(agent_id=label)
     history = tool_use_context.messages
     _msg_count_at_usage = len(history)
 
@@ -370,11 +371,21 @@ async def agent_loop(
     main_tools = tool_registry.list_names()
 
     # --- Independent reminder channels (each can be reloaded separately) ---
+    from src.types import PlanPhase
+
     def _build_attachments() -> list[Attachment]:
         s = build_skill_reminder(main_tools, use_sent_tracking=True)
         a = build_agent_reminder(main_tools, use_sent_tracking=True)
         m = build_memory_index_reminder()
-        return [x for x in (s, a, m) if x]
+        parts: list[Attachment | None] = [s, a, m]
+        if state.plan_phase == PlanPhase.ACTIVE:
+            from src.plan_mode import build_plan_mode_attachment
+            parts.append(build_plan_mode_attachment(state.plan_file_path))
+        elif state.plan_phase == PlanPhase.EXITING:
+            from src.plan_mode import build_plan_exit_attachment
+            parts.append(build_plan_exit_attachment(state.plan_file_path))
+            state.plan_phase = PlanPhase.INACTIVE
+        return [x for x in parts if x]
 
     attachments = _build_attachments()
     if attachments:
@@ -386,7 +397,13 @@ async def agent_loop(
         m = build_memory_index_reminder()
         k = _build_invoked_skills_attachment(tool_use_context.invoked_skills)
         f = _build_file_restore_attachments(file_snapshot)
-        return [x for x in (s, a, m, k, f) if x]
+        parts = [s, a, m, k, f]
+        if state.plan_file_path:
+            from src.plan_mode import build_plan_mode_attachment, build_plan_content_attachment
+            if state.plan_phase == PlanPhase.ACTIVE:
+                parts.append(build_plan_mode_attachment(state.plan_file_path))
+            parts.append(build_plan_content_attachment(state.plan_file_path))
+        return [x for x in parts if x]
 
     history_copy = copy.copy(history)
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
@@ -398,6 +415,7 @@ async def agent_loop(
         permissions=_get_permission_engine(),
         file_state_cache=file_state_cache,
     )
+    tool_use_context.agent_state = state
 
     turn_start_index = len(history)
 
@@ -407,7 +425,6 @@ async def agent_loop(
         system_prompt=system,
         tool_use_context=tool_use_context,
         max_turns=config.MAX_TURNS,
-        state=state,
         label="main",
         stream=True,
         thinking=_build_thinking_param(),

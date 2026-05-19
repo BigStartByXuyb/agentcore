@@ -17,7 +17,7 @@ import inspect
 import logging
 from dataclasses import dataclass, replace
 
-from src.types import EventCallback, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
+from src.types import EventCallback, ToolDef, ToolPermissionResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import registry as tool_registry
 from src.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
 
@@ -66,36 +66,41 @@ async def run_tool_use(
         on_event(ToolStart(label=label, tool_name=tool_name, tool_input=tool_input))
 
         # --- Permission check ---
-        if context.permissions is not None:
-            content = _extract_content(tool_name, tool_input)
-            decision = context.permissions.check(tool_name, content)
+        perm = check_tool_permissions(tool, tool_name, tool_input, context)
 
-            if decision.behavior == "deny":
-                msg = decision.message or "Permission denied,You do not have permission to access this path[{content}]."
-                on_event(PermissionDenied(label=label, tool_name=tool_name, message=msg))
-                on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=msg))
-                return (ToolResult(data=None), id, msg, True)
+        if perm.behavior == "deny":
+            on_event(PermissionDenied(label=label, tool_name=tool_name, message=perm.deny_message))
+            on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=perm.deny_message))
+            return (ToolResult(data=None), id, perm.deny_message, True)
 
-            if decision.behavior == "ask":
-                future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-                on_event(PermissionRequest(
-                    label=label, tool_name=tool_name, tool_input=tool_input, future=future,
+        if perm.behavior == "ask":
+            future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+            on_event(PermissionRequest(
+                label=label, tool_name=tool_name, tool_input=tool_input,
+                future=future, custom_prompt=perm.custom_prompt,
+            ))
+            answer = await future
+
+            if answer in ("y", "yes"):
+                pass
+            elif answer == "always" and perm.custom_prompt is None and context.permissions is not None:
+                from src.permissions import PermissionRule
+                context.permissions.add_session_rule(PermissionRule(
+                    tool_name=tool_name,
+                    content_pattern=perm.engine_content,
+                    behavior="allow",
+                    source="session",
                 ))
-                answer = await future
-                if answer in ("y", "yes"):
-                    pass
-                elif answer == "always":
-                    from src.permissions import PermissionRule
-                    context.permissions.add_session_rule(PermissionRule(
-                        tool_name=tool_name,
-                        content_pattern=content,
-                        behavior="allow",
-                        source="session",
-                    ))
+            else:
+                if perm.custom_prompt:
+                    feedback = answer[2:] if answer.startswith("n:") else ""
+                    deny_msg = "User rejected the plan."
+                    if feedback:
+                        deny_msg += f" Feedback: {feedback}"
                 else:
-                    deny_msg = "User denied permission,You do not have permission to access this path[{content}]."
-                    on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg))
-                    return (ToolResult(data=None), id, deny_msg, True)
+                    deny_msg = f"User denied permission for {tool_name}."
+                on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=deny_msg))
+                return (ToolResult(data=None), id, deny_msg, True)
 
         ctx_with_event = replace(context, on_event=on_event)
         ret = tool.executor(tool_input, ctx_with_event)
@@ -312,6 +317,31 @@ class StreamingToolExecutor:
 # ---------------------------------------------------------------------------
 # Permission helpers
 # ---------------------------------------------------------------------------
+
+def check_tool_permissions(
+    tool: ToolDef, tool_name: str, tool_input: dict, context: ToolUseContext,
+) -> ToolPermissionResult:
+    """Resolve permission: tool.check_permissions first, PermissionEngine as passthrough fallback.
+
+    Mirrors Claude Code's checkPermissions() flow:
+      1. tool.check_permissions() → allow/ask/deny → use directly
+      2. tool.check_permissions() → passthrough → PermissionEngine.check()
+    """
+    check_result = tool.check_permissions(tool_input, context)
+
+    if check_result.behavior != "passthrough":
+        return check_result
+
+    if context.permissions is not None:
+        content = _extract_content(tool_name, tool_input)
+        result = context.permissions.check(tool_name, content)
+        result.engine_content = content
+        if not result.deny_message and result.behavior == "deny":
+            result.deny_message = f"Permission denied for {tool_name}."
+        return result
+
+    return ToolPermissionResult(behavior="ask")
+
 
 def _extract_content(tool_name: str, tool_input: dict) -> str | None:
     """Extract the permission-relevant content string from tool input."""

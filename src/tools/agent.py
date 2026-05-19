@@ -186,6 +186,7 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     # --- Sub-agent context ---
     from src.utils.file_state_cache import FileStateCache
+    label = f"agent:{agent_def.name}"
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
@@ -194,12 +195,8 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         permissions=context.permissions.as_silent() if context.permissions else None,
         on_event=context.on_event,
         file_state_cache=FileStateCache(),
+        agent_state=AgentState(agent_id=label),
     )
-
-    # --- Sub-agent state ---
-    sub_state = AgentState(agent_id=f"agent:{agent_def.name}")
-    label = f"agent:{agent_def.name}"
-    on_event = context.on_event
 
     try:
         from src.agent_loop import run_agent_loop
@@ -208,9 +205,8 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
             system_prompt=system_prompt,
             tool_use_context=sub_context,
             max_turns=agent_def.max_turns,
-            state=sub_state,
             label=label,
-            on_event=on_event,
+            on_event=context.on_event,
         )
     except Exception as e:
         return ToolResult(data={

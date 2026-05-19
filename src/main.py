@@ -18,7 +18,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from src import config
 from src.agent_loop import agent_loop
-from src.types import AgentState, MessageHistory
+from src.types import AgentState, MessageHistory, PlanPhase
 from src.utils.file_state_cache import FileStateCache
 from src.mcp_tool import register_mcp_tools
 from src.tools import registry as tool_registry
@@ -55,6 +55,32 @@ async def async_main() -> None:
         if stripped in ("exit", "quit"):
             print("Bye.")
             break
+
+        # --- /clear command: reset session state ---
+        if stripped == "/clear":
+            from src.plan_mode import clear_slug_cache
+            clear_slug_cache(state.agent_id)
+            history = MessageHistory()
+            state = AgentState()
+            file_cache = FileStateCache()
+            print("Context cleared.")
+            continue
+
+        # --- /plan command: toggle plan mode ---
+        if stripped == "/plan" or stripped.startswith("/plan "):
+            task_desc = stripped[5:].strip() if len(stripped) > 5 else ""
+            if state.plan_phase == PlanPhase.ACTIVE and not task_desc:
+                state.plan_phase = PlanPhase.EXITING
+                print("Plan mode deactivated.")
+                continue
+            if state.plan_phase != PlanPhase.ACTIVE:
+                from src.plan_mode import enter_plan_mode
+                state.plan_file_path = enter_plan_mode(session_id=state.agent_id)
+                state.plan_phase = PlanPhase.ACTIVE
+                print(f"Plan mode activated. Plan file: {state.plan_file_path}")
+            if not task_desc:
+                continue
+            stripped = task_desc
 
         try:
             await agent_loop(stripped, history, state, file_cache)

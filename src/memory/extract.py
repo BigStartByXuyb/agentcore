@@ -160,6 +160,7 @@ async def run_memory_extraction(
         depth=1,
         tool_overrides={"write_file": restricted_write},
         on_event=cb,
+        agent_state=AgentState(agent_id="memory-extraction"),
     )
 
     try:
@@ -169,7 +170,6 @@ async def run_memory_extraction(
             system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=5,
-            state=AgentState(agent_id="memory-extraction"),
             label="memory-extraction",
             stream=False,
             on_event=cb,

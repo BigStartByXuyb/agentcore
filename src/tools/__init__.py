@@ -15,6 +15,7 @@ from src.tools.grep import tool as grep_tool
 from src.tools.skill import tool as skill_tool
 from src.tools.agent import tool as agent_tool
 from src.tools.edit_file import tool as edit_file_tool
+from src.tools.exit_plan_mode import tool as exit_plan_mode_tool
 
 
 class ToolRegistry:
@@ -65,3 +66,4 @@ registry.register(grep_tool.name, grep_tool)
 registry.register(skill_tool.name, skill_tool)
 registry.register(agent_tool.name, agent_tool)
 registry.register(edit_file_tool.name, edit_file_tool)
+registry.register(exit_plan_mode_tool.name, exit_plan_mode_tool)

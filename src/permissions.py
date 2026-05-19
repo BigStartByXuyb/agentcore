@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from src.types import ToolPermissionResult
+
 logger = logging.getLogger(__name__)
 
 PermissionBehavior = Literal["allow", "deny", "ask"]
@@ -44,11 +46,6 @@ class PermissionRule:
         return f"{self.behavior}:{self.tool_name}{pat}[{self.source}]"
 
 
-@dataclass
-class PermissionDecision:
-    behavior: PermissionBehavior
-    matched_rule: PermissionRule | None = None
-    message: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +83,36 @@ def match_content(pattern: str | None, content: str | None) -> bool:
         prefix = pattern[:-1]
         return content.startswith(prefix)
     return content == pattern
+
+
+# ---------------------------------------------------------------------------
+# Default rules — built-in safe defaults
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Internal editable paths — auto-allowed without user confirmation
+# Mirrors Claude Code's checkEditableInternalPath() in filesystem.ts
+# ---------------------------------------------------------------------------
+
+_MY_AGENT_DIR = os.path.normpath(os.path.join(os.path.expanduser("~"), ".my-agent"))
+_EDITABLE_SUBDIRS = ("plans", "memory")
+
+_FILE_WRITE_TOOLS = {"write_file", "edit_file"}
+
+
+def is_internal_editable_path(path: str) -> bool:
+    """Check if a path is an internal file that can be written without permission.
+
+    Currently auto-allows:
+      - ~/.my-agent/plans/*  (plan files)
+      - ~/.my-agent/memory/* (memory files)
+    """
+    normalized = os.path.normpath(os.path.abspath(path))
+    for subdir in _EDITABLE_SUBDIRS:
+        prefix = os.path.join(_MY_AGENT_DIR, subdir)
+        if normalized.startswith(prefix + os.sep) or normalized == prefix:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +201,11 @@ class PermissionEngine:
     def _all_rules(self) -> list[PermissionRule]:
         return self._session_rules + self._project_rules + self._user_rules + _DEFAULT_RULES
 
-    def check(self, tool_name: str, content: str | None = None) -> PermissionDecision:
+    def check(self, tool_name: str, content: str | None = None) -> ToolPermissionResult:
         """Check permission for a tool invocation.
 
         1. Scan all deny rules (highest priority first) — hit → deny
+        1.5. Internal editable paths (plan files, memory files) → allow
         2. Scan all allow rules (highest priority first) — hit → allow
         3. No match → ask
         """
@@ -187,21 +215,27 @@ class PermissionEngine:
             if rule.behavior != "deny":
                 continue
             if self._matches(rule, tool_name, content):
-                return PermissionDecision(
+                return ToolPermissionResult(
                     behavior="deny",
-                    matched_rule=rule,
-                    message=f"Denied by rule: {rule}",
+                    deny_message=f"Denied by rule: {rule}",
                 )
+
+        if (
+            tool_name in _FILE_WRITE_TOOLS
+            and content is not None
+            and is_internal_editable_path(content)
+        ):
+            return ToolPermissionResult(behavior="allow")
 
         for rule in rules:
             if rule.behavior != "allow":
                 continue
             if self._matches(rule, tool_name, content):
-                return PermissionDecision(behavior="allow", matched_rule=rule)
+                return ToolPermissionResult(behavior="allow")
 
-        return PermissionDecision(
+        return ToolPermissionResult(
             behavior="deny" if self._silent else "ask",
-            message="Sub-agent cannot prompt for permission" if self._silent else None,
+            deny_message="Sub-agent cannot prompt for permission" if self._silent else "",
         )
 
     def as_silent(self) -> "PermissionEngine":

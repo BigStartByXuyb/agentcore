@@ -355,6 +355,8 @@ class ToolUseContext:
     # --- session-level caches (cleared on /clear, consumed by compaction) ---
     file_state_cache: Any | None = None                                # FileStateCache instance
     invoked_skills: dict[str, "InvokedSkillInfo"] = field(default_factory=dict)  # inline skills active this session
+    # --- task store (LLM self-managed todo list) ---
+    task_store: Any | None = None  # TaskStore instance (avoid circular import)
     # --- agent state back-reference ---
     agent_state: "AgentState | None" = None # back-reference so tools (e.g. ExitPlanMode) can read/mutate state
 
@@ -414,6 +416,18 @@ class InvokedSkillInfo:
     invoked_at: float = field(default_factory=time.time)
 
 
+TaskStatus = Literal["pending", "in_progress", "completed"]
+
+
+@dataclass
+class TaskItem:
+    """A single task in the LLM's self-managed todo list."""
+    id: int
+    content: str
+    status: TaskStatus = "pending"
+    active_form: str = ""
+
+
 class PlanPhase(str, Enum):
     """Plan mode lifecycle — single state variable, no illegal combinations.
 
@@ -443,6 +457,9 @@ class AgentState:
     messages_since_last_usage: int = 0
     plan_phase: PlanPhase = PlanPhase.INACTIVE
     plan_file_path: str | None = None
+    turns_since_task_write: int = 0
+    turns_since_task_reminder: int = 0
+    _task_store: Any | None = field(default=None, repr=False)
 
 
 class ToolDef:

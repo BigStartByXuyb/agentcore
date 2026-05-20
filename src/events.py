@@ -149,3 +149,19 @@ class PermissionDenied(AgentEvent):
     """Tool was denied by a permission rule."""
     tool_name: str = ""
     message: str = ""
+
+
+# ---------------------------------------------------------------------------
+# User interaction events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UserQuestionRequest(AgentEvent):
+    """LLM is asking the user a structured question — consumer fills the Future.
+
+    The tool executor emits this event and awaits the Future. The display
+    handler presents numbered options (plus an "Other" free-text option),
+    collects the user's choice, and resolves the Future with the answers dict.
+    """
+    questions: list[dict] = field(default_factory=list)
+    future: asyncio.Future | None = None

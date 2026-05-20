@@ -45,6 +45,7 @@ from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
 from src.compact.micro_compact import should_micro_compact, micro_compact
 from src.compact.auto_compact import should_auto_compact, auto_compact, estimate_token_count
+from src.task_store import TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 POST_COMPACT_MAX_FILES = 5
 POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000
 POST_COMPACT_FILES_TOKEN_BUDGET = 50_000
+TASK_REMINDER_INTERVAL = 10
 
 
 def _build_invoked_skills_attachment(
@@ -226,6 +228,33 @@ async def run_agent_loop(
             if last_user is not None:
                 last_user.attach(changed_atts)
 
+        # --- Task reminder: nudge LLM if active tasks haven't been touched ---
+        _task_store = tool_use_context.task_store
+        if (
+            _task_store is not None
+            and _task_store.has_active()
+            and _state.turns_since_task_write >= TASK_REMINDER_INTERVAL
+            and _state.turns_since_task_reminder >= TASK_REMINDER_INTERVAL
+        ):
+            reminder = Attachment(
+                type="system_reminder",
+                content=(
+                    "<system-reminder>\n"
+                    "The task tools haven't been used recently. If you're working on "
+                    "tasks that would benefit from tracking progress, consider using "
+                    "TaskCreate to add new tasks and TaskUpdate to update task status "
+                    "(set to in_progress when starting, completed when done). "
+                    "Also consider cleaning up the task list if it has become stale. "
+                    "Only use these if relevant to the current work. "
+                    "This is just a gentle reminder - ignore if not applicable.\n"
+                    "</system-reminder>"
+                ),
+            )
+            last_user = history.last_user_message()
+            if last_user is not None:
+                last_user.attach([reminder])
+            _state.turns_since_task_reminder = 0
+
         tools = build_tool_schemas(
             tool_registry,
             allowed_tools=tool_use_context.tools,
@@ -347,6 +376,20 @@ async def run_agent_loop(
         # Track messages added since last API usage snapshot
         # (assistant response + tool_results + any injected messages)
         _state.messages_since_last_usage = len(history) - _msg_count_at_usage
+
+        # --- Task counters: detect task tool usage this turn ---
+        _task_tool_names = {"TaskCreate", "TaskUpdate", "TaskList"}
+        _used_task_tool = any(
+            tc.name in _task_tool_names
+            for group in tool_groups
+            for tc in group.tool_call
+        )
+        if _used_task_tool:
+            _state.turns_since_task_write = 0
+            _state.turns_since_task_reminder = 0
+        else:
+            _state.turns_since_task_write += 1
+            _state.turns_since_task_reminder += 1
         continue
 
     return f"[Agent loop '{label}' reached max turns ({max_turns})]"
@@ -408,12 +451,17 @@ async def agent_loop(
     history_copy = copy.copy(history)
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
 
+    # --- Task store: create if not already on state ---
+    if not hasattr(state, "_task_store"):
+        state._task_store = TaskStore()
+
     system = build_system_prompt()
     tool_use_context = ToolUseContext(
         messages=history,
         tools=tool_registry.list_names(),
         permissions=_get_permission_engine(),
         file_state_cache=file_state_cache,
+        task_store=state._task_store,
     )
     tool_use_context.agent_state = state
 

@@ -121,9 +121,13 @@ def is_internal_editable_path(path: str) -> bool:
 
 _DEFAULT_RULES: list[PermissionRule] = [
     PermissionRule(tool_name="read_file", content_pattern=None, behavior="allow", source="default"),
+    PermissionRule(tool_name="glob", content_pattern=None, behavior="allow", source="default"),
     PermissionRule(tool_name="grep", content_pattern=None, behavior="allow", source="default"),
     PermissionRule(tool_name="Skill", content_pattern=None, behavior="allow", source="default"),
     PermissionRule(tool_name="Agent", content_pattern=None, behavior="allow", source="default"),
+    PermissionRule(tool_name="TaskCreate", content_pattern=None, behavior="allow", source="default"),
+    PermissionRule(tool_name="TaskUpdate", content_pattern=None, behavior="allow", source="default"),
+    PermissionRule(tool_name="TaskList", content_pattern=None, behavior="allow", source="default"),
 ]
 
 # ---------------------------------------------------------------------------

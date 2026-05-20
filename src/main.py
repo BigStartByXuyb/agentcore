@@ -60,6 +60,8 @@ async def async_main() -> None:
         if stripped == "/clear":
             from src.plan_mode import clear_slug_cache
             clear_slug_cache(state.agent_id)
+            if hasattr(state, "_task_store") and state._task_store is not None:
+                state._task_store.clear()
             history = MessageHistory()
             state = AgentState()
             file_cache = FileStateCache()

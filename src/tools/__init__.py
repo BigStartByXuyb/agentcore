@@ -16,6 +16,11 @@ from src.tools.skill import tool as skill_tool
 from src.tools.agent import tool as agent_tool
 from src.tools.edit_file import tool as edit_file_tool
 from src.tools.exit_plan_mode import tool as exit_plan_mode_tool
+from src.tools.ask_user import tool as ask_user_tool
+from src.tools.glob_tool import tool as glob_tool
+from src.tools.task_create import tool as task_create_tool
+from src.tools.task_update import tool as task_update_tool
+from src.tools.task_list import tool as task_list_tool
 
 
 class ToolRegistry:
@@ -67,3 +72,8 @@ registry.register(skill_tool.name, skill_tool)
 registry.register(agent_tool.name, agent_tool)
 registry.register(edit_file_tool.name, edit_file_tool)
 registry.register(exit_plan_mode_tool.name, exit_plan_mode_tool)
+registry.register(ask_user_tool.name, ask_user_tool)
+registry.register(glob_tool.name, glob_tool)
+registry.register(task_create_tool.name, task_create_tool)
+registry.register(task_update_tool.name, task_update_tool)
+registry.register(task_list_tool.name, task_list_tool)

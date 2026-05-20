@@ -34,7 +34,7 @@ Your summary should include:
 4. Errors and Fixes: List errors encountered and how they were fixed
 5. Problem Solving: Document problems solved and ongoing troubleshooting
 6. All User Messages: List ALL non-tool-result user messages
-7. Pending Tasks: Outline pending tasks explicitly asked to work on
+7. Pending Tasks: Outline pending tasks explicitly asked to work on. If the LLM was using TaskCreate/TaskUpdate/TaskList tools to track work, preserve the current task list with IDs and statuses so the LLM can resume tracking after compaction.
 8. Active Skills: For each skill invoked in this session, record: skill name, what steps were completed, what steps remain, and whether it is still in progress or finished. If no skills were used, write "None".
 9. Current Work: Describe precisely what was being worked on immediately before this summary. If a skill is active, include which step of the skill you were on.
 10. Optional Next Step: The next step related to the most recent work. Include direct quotes from the most recent conversation to ensure no drift in task interpretation.

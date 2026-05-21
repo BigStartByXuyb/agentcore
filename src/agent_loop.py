@@ -325,8 +325,9 @@ async def run_agent_loop(
         def _emit_error(err: Exception) -> None:
             """Inject error into history and emit ErrorEvent."""
             error_msg = create_assistant_error_message(err)
-            history.add_assistant(error_msg["content"])
-            on_event(ErrorEvent(label=label, error_text=error_msg["content"][0]["text"]))
+            error_text = error_msg["content"][0]["text"]
+            history.add_assistant([TextContent(text=error_text)])
+            on_event(ErrorEvent(label=label, error_text=error_text))
 
         try:
             response = await _call_llm()

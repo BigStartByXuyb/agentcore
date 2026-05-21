@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import threading
-from typing import Any
+import logging
 import src.mcp_tool.base as base
 
-class McpPipelineClient(base.McpClientBase):
-    """MCP client for pipeline servers.
+log = logging.getLogger(__name__)
 
-    This is a thin wrapper around McpHttpClient that translates between the
-    pipeline server's expected tool schema and the MCP client's interface.
-    """
-    async def _async_lifecycle(self):
+
+class McpPipelineClient(base.McpClientBase):
+    """MCP client for pipeline (stdio) servers."""
+
+    async def _async_lifecycle(self) -> None:
         from contextlib import AsyncExitStack
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
+
         self._close_event = asyncio.Event()
         async with AsyncExitStack() as stack:
             read, write = await stack.enter_async_context(
@@ -30,6 +30,9 @@ class McpPipelineClient(base.McpClientBase):
             )
             await session.initialize()
             self._session = session
+
+            self._register_list_changed(session)
+
             if self._ready_event is not None:
                 self._ready_event.set()
             await self._close_event.wait()

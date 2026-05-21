@@ -169,6 +169,49 @@ def _reinject_after_compact(
         last_msg.attach(attachments)
 
 
+async def _process_nonstream_tools(
+    response,
+    assistant_content: list[ContentBlock],
+    history: MessageHistory,
+    tool_use_context: ToolUseContext,
+    label: str,
+    state: AgentState,
+    on_event: EventCallback,
+) -> tuple[ToolUseContext, list[str]] | None:
+    """Emit thinking/text events, collect and execute tool_use blocks.
+
+    Returns (updated_context, tool_names_used) if tools were executed,
+    or None if no tools — caller should return final text in that case.
+    """
+    tool_groups: list[ToolCallGroup] = []
+    for block in response.content:
+        if getattr(block, "type", None) == "thinking":
+            text = getattr(block, "thinking", "") or ""
+            if text:
+                on_event(ThinkingBlock(label=label, thinking=text))
+        elif block.type == "text":
+            on_event(TextBlock(label=label, text=block.text))
+        elif block.type == "tool_use":
+            merge_tool_call(id=block.id, tool_name=block.name,
+                            tool_input=block.input, groups=tool_groups)
+
+    if not tool_groups:
+        on_event(TokenUsage(
+            label=label,
+            input_tokens=state.total_input_tokens,
+            output_tokens=state.total_output_tokens,
+            thinking_tokens=state.total_thinking_tokens,
+        ))
+        return None
+
+    tool_results = await execute_tool_groups(label, tool_groups, tool_use_context, on_event)
+    tool_use_context = _apply_tool_results(
+        tool_results, assistant_content, history, tool_use_context,
+    )
+    tool_names_used = [tc.name for group in tool_groups for tc in group.tool_call]
+    return tool_use_context, tool_names_used
+
+
 async def run_agent_loop(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
@@ -337,60 +380,33 @@ async def run_agent_loop(
         assistant_content = _serialize_content(response.content)
         history.add_assistant(assistant_content)
 
-        # --- Stream path: tools already executed by StreamingToolExecutor ---
+        # --- Execute tools: stream vs non-stream ---
         if stream and streaming_executor is not None and streaming_executor.has_tools():
             tool_use_context = _apply_tool_results(
                 streaming_executor.collect_results(),
                 assistant_content, history, tool_use_context,
             )
-            continue
+            tool_names_used = [t.name for t in streaming_executor._tools]
+        else:
+            result = await _process_nonstream_tools(
+                response, assistant_content, history, tool_use_context,
+                label, _state, on_event,
+            )
+            if result is None:
+                return extract_text(response.content)
+            tool_use_context, tool_names_used = result
 
-        # --- Non-stream path: emit thinking/text, collect tool_use into groups ---
-        tool_groups: list[ToolCallGroup] = []
-        for block in response.content:
-            if getattr(block, "type", None) == "thinking":
-                text = getattr(block, "thinking", "") or ""
-                if text:
-                    on_event(ThinkingBlock(label=label, thinking=text))
-            elif block.type == "text":
-                on_event(TextBlock(label=label, text=block.text))
-            elif block.type == "tool_use":
-                merge_tool_call(id=block.id, tool_name=block.name,
-                                tool_input=block.input, groups=tool_groups)
-
-        if not tool_groups:
-            on_event(TokenUsage(
-                label=label,
-                input_tokens=_state.total_input_tokens,
-                output_tokens=_state.total_output_tokens,
-                thinking_tokens=_state.total_thinking_tokens,
-            ))
-            return extract_text(response.content)
-
-        # --- Batch execute tools + collect results ---
-        tool_results = await execute_tool_groups(label, tool_groups, tool_use_context, on_event)
-
-        tool_use_context = _apply_tool_results(
-            tool_results, assistant_content, history, tool_use_context,
-        )
-        # Track messages added since last API usage snapshot
-        # (assistant response + tool_results + any injected messages)
+        # --- Shared post-tool logic (both paths) ---
         _state.messages_since_last_usage = len(history) - _msg_count_at_usage
 
-        # --- Task counters: detect task tool usage this turn ---
         _task_tool_names = {"TaskCreate", "TaskUpdate", "TaskList"}
-        _used_task_tool = any(
-            tc.name in _task_tool_names
-            for group in tool_groups
-            for tc in group.tool_call
-        )
+        _used_task_tool = any(n in _task_tool_names for n in tool_names_used)
         if _used_task_tool:
             _state.turns_since_task_write = 0
             _state.turns_since_task_reminder = 0
         else:
             _state.turns_since_task_write += 1
             _state.turns_since_task_reminder += 1
-        continue
 
     return f"[Agent loop '{label}' reached max turns ({max_turns})]"
 
@@ -452,7 +468,7 @@ async def agent_loop(
     memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
 
     # --- Task store: create if not already on state ---
-    if not hasattr(state, "_task_store"):
+    if state._task_store is None:
         state._task_store = TaskStore()
 
     system = build_system_prompt()

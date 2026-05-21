@@ -93,6 +93,37 @@ def _map_result(result_data: dict) -> str:
         return f"Error: {content}"
     return content
 
+def _refresh_server_tools(server_name: str) -> None:
+    """重新获取指定 server 的工具列表并更新注册表。"""
+    srv = _servers.get(server_name)
+    if srv is None or _tool_registry is None:
+        return
+
+    try:
+        tool_list = srv.client.list_tools()
+    except Exception as e:
+        log.error("[mcp] Failed to refresh tools for %s: %s", server_name, e)
+        return
+
+    _tool_registry.unregister_by_source(f"mcp:{server_name}")
+    old_count = len(srv.tool_names)
+
+    new_names: list[str] = []
+    for sname, tools in tool_list.items():
+        for tool in tools:
+            qname = f"mcp__{sname}__{tool['name']}"
+            td = ToolDef(
+                schema=_make_mcp_schema(qname, tool),
+                executor=_make_mcp_executor(tool['name'], srv.client),
+                map_result=_map_result,
+            )
+            _tool_registry.register(td.name, td, source=f"mcp:{server_name}")
+            new_names.append(qname)
+
+    srv.tool_names = new_names
+    log.info("[mcp] Refreshed %s: %d → %d tools", server_name, old_count, len(new_names))
+
+
 def _connect_servers(
     configs: list[McpServerConfig],
 ) -> tuple[list[tuple[McpServerConfig, McpServer, list[ToolDef]]], list[str]]:
@@ -118,6 +149,8 @@ def _connect_servers(
             else:
                 err_msgs.append(f"Unsupported MCP server type {cfg.type!r} for server {cfg.name!r}")
                 continue
+            name = cfg.name
+            client._on_tools_changed = lambda _name=name: _refresh_server_tools(_name)
             client.start()
             pending.append((cfg, client))
         except Exception as e:

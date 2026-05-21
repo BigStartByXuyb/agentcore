@@ -30,7 +30,11 @@ def merge_tool_call(id:str, tool_name: str, tool_input: dict, groups: list[ToolC
     tool = tool_registry.get(tool_name)
     if tool is None:
         return
-    call_type = "read-only" if tool.is_read_only(tool_input) else "read-write"
+    try:
+        is_ro = tool.is_read_only(tool_input)
+    except Exception:
+        is_ro = False
+    call_type = "read-only" if is_ro else "read-write"
 
     if groups and groups[-1].type == call_type:
         groups[-1].tool_call.append(ToolCall(id=id, name=tool_name, input=tool_input))

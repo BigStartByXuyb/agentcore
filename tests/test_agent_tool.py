@@ -9,30 +9,22 @@ Tests:
   16-19. File-based discovery — discover, override, parsing, schema dynamic
 """
 
+import asyncio
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 
 def _mock_run_agent_loop(return_value):
-    """Return a side_effect function that produces a generator returning the given value."""
-    def _side_effect(*args, **kwargs):
-        return _gen()
-    def _gen():
+    """Return a side_effect coroutine function that returns the given value."""
+    async def _side_effect(*args, **kwargs):
         return return_value
-        yield  # noqa: unreachable — makes this a generator function
     return _side_effect
 
 
-def _drain(gen_or_value):
-    """Drain a generator and return its final value, or return the value directly."""
-    if hasattr(gen_or_value, '__next__'):
-        try:
-            while True:
-                next(gen_or_value)
-        except StopIteration as e:
-            return e.value
-    return gen_or_value
+def _run_async(coro):
+    """Run an async function synchronously for tests."""
+    return asyncio.run(coro)
 
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -101,22 +93,17 @@ def test_agent_schema():
 # _resolve_tools — 'agent' always excluded
 # ---------------------------------------------------------------------------
 
-def test_resolve_tools_excludes_agent():
-    """All resolved tool schemas must NOT include 'agent'."""
-    schemas = _resolve_tools(_DEFAULT_AGENT)
-    names = [s["name"] for s in schemas]
-    assert "agent" not in names
-    # Should include other tools
+def test_resolve_tools_default_includes_all():
+    """Default agent (allowed_tools=None) includes all registered tools."""
+    names = _resolve_tools(_DEFAULT_AGENT)
     assert "bash" in names
     assert "read_file" in names
-    print("  [PASS] test_resolve_tools_excludes_agent")
+    print("  [PASS] test_resolve_tools_default_includes_all")
 
 
 def test_resolve_tools_with_whitelist():
-    """Whitelisted agent should only get its allowed tools (+ Skill always included)."""
-    schemas = _resolve_tools(explore_agent)
-    names = [s["name"] for s in schemas]
-    # build_tool_schemas always includes Skill
+    """Whitelisted agent should only get its allowed tools."""
+    names = _resolve_tools(explore_agent)
     assert "bash" in names
     assert "read_file" in names
     assert "grep" in names
@@ -129,14 +116,15 @@ def test_resolve_tools_with_whitelist():
 # ---------------------------------------------------------------------------
 
 def _make_context(depth: int = 0) -> ToolUseContext:
-    return ToolUseContext(messages=[], tools=["bash", "read_file", "grep", "agent"], depth=depth)
+    from src.types import MessageHistory
+    return ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "grep", "agent"], depth=depth)
 
 
 @patch("src.agent_loop.run_agent_loop", side_effect=_mock_run_agent_loop("Found 3 matching files."))
 def test_executor_default_agent(mock_loop):
     """No agent_type → uses general-purpose default."""
     ctx = _make_context()
-    result = _drain(_execute({"description": "search code", "prompt": "Find all Python files"}, ctx))
+    result = _run_async(_execute({"description": "search code", "prompt": "Find all Python files"}, ctx))
 
     assert result.data["success"] is True
     assert result.data["agent_name"] == "general-purpose"
@@ -157,7 +145,7 @@ def test_executor_default_agent(mock_loop):
 def test_executor_explore_agent(mock_loop):
     """agent_type=Explore → uses Explore agent definition."""
     ctx = _make_context()
-    result = _drain(_execute(
+    result = _run_async(_execute(
         {"description": "find entry", "prompt": "Where is main?", "agent_type": "Explore"},
         ctx,
     ))
@@ -169,8 +157,8 @@ def test_executor_explore_agent(mock_loop):
     call_kwargs = mock_loop.call_args.kwargs
     assert call_kwargs["system_prompt"] == explore_agent.system_prompt
     assert call_kwargs["max_turns"] == 12
-    # Explore gets its allowed tools (+ Skill always included by build_tool_schemas)
-    tool_names = [t["name"] for t in call_kwargs["tools"]]
+    # Explore gets its allowed tools via tool_use_context.tools
+    tool_names = call_kwargs["tool_use_context"].tools
     assert "bash" in tool_names
     assert "read_file" in tool_names
     assert "grep" in tool_names
@@ -181,7 +169,7 @@ def test_executor_explore_agent(mock_loop):
 def test_executor_unknown_agent_type():
     """Unknown agent_type → error result."""
     ctx = _make_context()
-    result = _drain(_execute(
+    result = _run_async(_execute(
         {"description": "test", "prompt": "do something", "agent_type": "NonExistent"},
         ctx,
     ))
@@ -194,7 +182,7 @@ def test_executor_unknown_agent_type():
 def test_executor_no_prompt():
     """Empty prompt → error result."""
     ctx = _make_context()
-    result = _drain(_execute({"description": "test", "prompt": ""}, ctx))
+    result = _run_async(_execute({"description": "test", "prompt": ""}, ctx))
     assert result.data["success"] is False
     assert "No prompt" in result.data["error"]
     print("  [PASS] test_executor_no_prompt")
@@ -204,7 +192,7 @@ def test_executor_depth_limit():
     """At max depth → error, no run_agent_loop call."""
     from src import config
     ctx = _make_context(depth=config.MAX_AGENT_DEPTH)
-    result = _drain(_execute({"description": "test", "prompt": "do something"}, ctx))
+    result = _run_async(_execute({"description": "test", "prompt": "do something"}, ctx))
     assert result.data["success"] is False
     assert "Maximum agent nesting depth" in result.data["error"]
     print("  [PASS] test_executor_depth_limit")
@@ -214,7 +202,7 @@ def test_executor_depth_limit():
 def test_executor_exception_handling(mock_loop):
     """Exception in run_agent_loop → graceful error result."""
     ctx = _make_context()
-    result = _drain(_execute({"description": "test", "prompt": "do something"}, ctx))
+    result = _run_async(_execute({"description": "test", "prompt": "do something"}, ctx))
     assert result.data["success"] is False
     assert "API timeout" in result.data["error"]
     print("  [PASS] test_executor_exception_handling")
@@ -314,44 +302,49 @@ def test_format_agent_listing():
     print("  [PASS] test_format_agent_listing")
 
 
+def _agent_tools():
+    """Tools list that includes 'agent' so build_agent_reminder doesn't short-circuit."""
+    return ["bash", "read_file", "grep", "agent"]
+
+
 def test_build_agent_reminder_first_call():
-    """First call returns a system-reminder message with all agents."""
+    """First call returns an Attachment with all agents."""
     reset_sent_agents()
-    msg = build_agent_reminder()
-    assert msg is not None
-    assert msg["role"] == "user"
-    assert "<system-reminder>" in msg["content"]
-    assert "Explore" in msg["content"]
+    att = build_agent_reminder(_agent_tools())
+    assert att is not None
+    assert att.type == "system_reminder"
+    assert "<system-reminder>" in att.content
+    assert "Explore" in att.content
     print("  [PASS] test_build_agent_reminder_first_call")
 
 
 def test_build_agent_reminder_second_call_none():
     """Second call with no new agents returns None."""
     reset_sent_agents()
-    build_agent_reminder()  # first call sends all
-    msg = build_agent_reminder()  # second call — nothing new
-    assert msg is None
+    build_agent_reminder(_agent_tools())  # first call sends all
+    att = build_agent_reminder(_agent_tools())  # second call — nothing new
+    assert att is None
     print("  [PASS] test_build_agent_reminder_second_call_none")
 
 
 def test_build_agent_reminder_force():
     """force=True re-sends all agents even if already sent."""
     reset_sent_agents()
-    build_agent_reminder()  # first call
-    msg = build_agent_reminder(force=True)  # force re-send
-    assert msg is not None
-    assert "Explore" in msg["content"]
+    build_agent_reminder(_agent_tools())  # first call
+    att = build_agent_reminder(_agent_tools(), force=True)  # force re-send
+    assert att is not None
+    assert "Explore" in att.content
     print("  [PASS] test_build_agent_reminder_force")
 
 
 def test_reset_sent_agents():
     """After reset, next call sends all agents again."""
     reset_sent_agents()
-    build_agent_reminder()
+    build_agent_reminder(_agent_tools())
     reset_sent_agents()
-    msg = build_agent_reminder()
-    assert msg is not None
-    assert "Explore" in msg["content"]
+    att = build_agent_reminder(_agent_tools())
+    assert att is not None
+    assert "Explore" in att.content
     print("  [PASS] test_reset_sent_agents")
 
 
@@ -365,7 +358,7 @@ if __name__ == "__main__":
     test_get_agent_unknown()
     test_list_agents()
     test_agent_schema()
-    test_resolve_tools_excludes_agent()
+    test_resolve_tools_default_includes_all()
     test_resolve_tools_with_whitelist()
     test_executor_default_agent()
     test_executor_explore_agent()

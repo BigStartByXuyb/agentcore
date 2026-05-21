@@ -17,7 +17,10 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from src import config
-from src.types import AgentState
+from src.types import (
+    AgentState, Message, ThinkingContent, RedactedThinkingContent,
+    TextContent, ToolUseContent,
+)
 from src.messages import (
     strip_thinking_blocks,
     filter_orphaned_thinking_messages,
@@ -79,12 +82,17 @@ class TestSerializeThinking:
     def test_thinking_block_serialized(self):
         blocks = [self._make_block(type="thinking", thinking="my thought", signature="sig123")]
         result = _serialize_content(blocks)
-        assert result == [{"type": "thinking", "thinking": "my thought", "signature": "sig123"}]
+        assert len(result) == 1
+        assert isinstance(result[0], ThinkingContent)
+        assert result[0].thinking == "my thought"
+        assert result[0].signature == "sig123"
 
     def test_redacted_thinking_block_serialized(self):
         blocks = [self._make_block(type="redacted_thinking", data="redacted_data")]
         result = _serialize_content(blocks)
-        assert result == [{"type": "redacted_thinking", "data": "redacted_data"}]
+        assert len(result) == 1
+        assert isinstance(result[0], RedactedThinkingContent)
+        assert result[0].data == "redacted_data"
 
     def test_mixed_blocks(self):
         blocks = [
@@ -94,9 +102,9 @@ class TestSerializeThinking:
         ]
         result = _serialize_content(blocks)
         assert len(result) == 3
-        assert result[0]["type"] == "thinking"
-        assert result[1]["type"] == "text"
-        assert result[2]["type"] == "tool_use"
+        assert result[0].type == "thinking"
+        assert result[1].type == "text"
+        assert result[2].type == "tool_use"
 
     def test_unknown_block_type_skipped(self):
         blocks = [self._make_block(type="unknown_type", data="x")]
@@ -261,22 +269,22 @@ class TestFilterOrphanedThinkingMessages:
 class TestCleanThinkingHistory:
     def test_in_place_mutation(self):
         messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "t", "signature": "s"},
-            ]},
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "t2", "signature": "s2"},
-                {"type": "text", "text": "hello"},
-            ]},
+            Message(role="user", content="hi"),
+            Message(role="assistant", content=[
+                ThinkingContent(thinking="t", signature="s"),
+            ]),
+            Message(role="assistant", content=[
+                ThinkingContent(thinking="t2", signature="s2"),
+                TextContent(text="hello"),
+            ]),
         ]
         original_id = id(messages)
         _clean_thinking_history(messages)
-        assert id(messages) == original_id  # same list object
-        # Orphaned thinking-only message removed
+        assert id(messages) == original_id
         assert len(messages) == 2
-        # Thinking stripped from mixed message
-        assert messages[1]["content"] == [{"type": "text", "text": "hello"}]
+        assert len(messages[1].content) == 1
+        assert isinstance(messages[1].content[0], TextContent)
+        assert messages[1].content[0].text == "hello"
 
 
 # ===================================================================
@@ -329,12 +337,12 @@ class TestAgentStateThinkingTokens:
 class TestThinkingRecovery:
     """Test that run_agent_loop strips thinking blocks on thinking-related 400."""
 
-    @patch("src.agent_loop.query_model")
-    def test_thinking_400_triggers_strip_and_retry(self, mock_query):
+    def test_thinking_400_triggers_strip_and_retry(self):
+        from unittest.mock import AsyncMock
         from anthropic import APIError
-        from src.types import ToolUseContext
+        from src.types import ToolUseContext, MessageHistory
+        import asyncio
 
-        # First call raises thinking 400, second succeeds
         err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
         err.status_code = 400
 
@@ -345,43 +353,42 @@ class TestThinkingRecovery:
         success_response.stop_reason = "end_turn"
         success_response.content = [types.SimpleNamespace(type="text", text="recovered")]
 
-        mock_query.side_effect = [err, success_response]
-
-        import asyncio
-        from src.types import MessageHistory, Message
+        mock_query = AsyncMock(side_effect=[err, success_response])
 
         history = MessageHistory([Message(role="user", content="test")])
         ctx = ToolUseContext(messages=history, tools=["bash"])
 
-        result = asyncio.run(run_agent_loop(
-            system_prompt="test",
-            tool_use_context=ctx,
-            max_turns=3,
-            thinking={"type": "enabled", "budget_tokens": 5000},
-            on_event=lambda _: None,
-        ))
+        with patch("src.agent_loop.query_model", mock_query):
+            result = asyncio.run(run_agent_loop(
+                system_prompt="test",
+                tool_use_context=ctx,
+                max_turns=3,
+                thinking={"type": "enabled", "budget_tokens": 5000},
+                on_event=lambda _: None,
+            ))
         assert result == "recovered"
         assert mock_query.call_count == 2
 
-    @patch("src.agent_loop.query_model")
-    def test_non_thinking_400_not_recovered(self, mock_query):
-        import asyncio
+    def test_non_thinking_400_not_recovered(self):
+        from unittest.mock import AsyncMock
         from anthropic import APIError
-        from src.types import ToolUseContext, MessageHistory, Message
+        from src.types import ToolUseContext, MessageHistory
+        import asyncio
 
         err = APIError(message="malformed request", request=MagicMock(), body=None)
         err.status_code = 400
 
-        mock_query.side_effect = err
+        mock_query = AsyncMock(side_effect=err)
 
         history = MessageHistory([Message(role="user", content="test")])
         ctx = ToolUseContext(messages=history, tools=["bash"])
 
-        result = asyncio.run(run_agent_loop(
-            system_prompt="test",
-            tool_use_context=ctx,
-            max_turns=3,
-            thinking={"type": "enabled", "budget_tokens": 5000},
-            on_event=lambda _: None,
-        ))
-        assert "400" in result.lower() or "bad request" in result.lower() or "error" in result.lower()
+        with patch("src.agent_loop.query_model", mock_query):
+            result = asyncio.run(run_agent_loop(
+                system_prompt="test",
+                tool_use_context=ctx,
+                max_turns=3,
+                thinking={"type": "enabled", "budget_tokens": 5000},
+                on_event=lambda _: None,
+            ))
+        assert "max turns" in result.lower()

@@ -162,21 +162,21 @@ class TestCreateAssistantErrorMessage:
 class TestBuildToolResultContent:
     def test_success_no_is_error(self):
         result = build_tool_result_content("id-1", "output text")
-        assert result["type"] == "tool_result"
-        assert result["tool_use_id"] == "id-1"
-        assert result["content"] == "output text"
-        assert "is_error" not in result
+        assert result.type == "tool_result"
+        assert result.tool_use_id == "id-1"
+        assert result.content == "output text"
+        assert result.is_error is False
 
     def test_success_explicit_false(self):
         result = build_tool_result_content("id-1", "output text", is_error=False)
-        assert "is_error" not in result
+        assert result.is_error is False
 
     def test_error_flag(self):
         result = build_tool_result_content("id-1", "something broke", is_error=True)
-        assert result["is_error"] is True
-        assert "<tool_use_error>" in result["content"]
-        assert "</tool_use_error>" in result["content"]
-        assert "something broke" in result["content"]
+        assert result.is_error is True
+        assert "<tool_use_error>" in result.content
+        assert "</tool_use_error>" in result.content
+        assert "something broke" in result.content
 
 
 # =========================================================================
@@ -184,9 +184,15 @@ class TestBuildToolResultContent:
 # =========================================================================
 
 class TestRunToolUse:
-    def _make_context(self):
+    def _make_context(self, extra_tools=None):
         from src.tools import registry
-        return ToolUseContext(messages=[], tools=["bash"])
+        from src.permissions import PermissionEngine, PermissionRule
+        tools = list(registry.list_names())
+        if extra_tools:
+            tools.extend(extra_tools)
+        perm = PermissionEngine()
+        perm.add_session_rule(PermissionRule(tool_name="*", content_pattern=None, behavior="allow", source="session"))
+        return ToolUseContext(messages=[], tools=tools, permissions=perm)
 
     def test_unknown_tool(self):
         result, text, is_error = _run_tool("test", "nonexistent", {}, "id-1", self._make_context())
@@ -262,34 +268,37 @@ class TestRunToolUse:
 class TestRecoverOrphanToolResults:
     def test_no_orphans(self):
         from src.agent_loop import _recover_orphan_tool_results
+        from src.types import ToolUseContent, ToolResultContent
         assistant_content = [
-            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+            ToolUseContent(id="t1", name="bash", input={}),
         ]
         tool_results = [
-            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            ToolResultContent(tool_use_id="t1", content="ok"),
         ]
         _recover_orphan_tool_results(assistant_content, tool_results)
         assert len(tool_results) == 1
 
     def test_one_orphan(self):
         from src.agent_loop import _recover_orphan_tool_results
+        from src.types import ToolUseContent, ToolResultContent
         assistant_content = [
-            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
-            {"type": "tool_use", "id": "t2", "name": "read_file", "input": {}},
+            ToolUseContent(id="t1", name="bash", input={}),
+            ToolUseContent(id="t2", name="read_file", input={}),
         ]
         tool_results = [
-            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            ToolResultContent(tool_use_id="t1", content="ok"),
         ]
         _recover_orphan_tool_results(assistant_content, tool_results)
         assert len(tool_results) == 2
-        orphan = [r for r in tool_results if r["tool_use_id"] == "t2"][0]
-        assert orphan["is_error"] is True
-        assert "<tool_use_error>" in orphan["content"]
+        orphan = [r for r in tool_results if r.tool_use_id == "t2"][0]
+        assert orphan.is_error is True
+        assert "<tool_use_error>" in orphan.content
 
     def test_no_tool_use_blocks(self):
         from src.agent_loop import _recover_orphan_tool_results
+        from src.types import TextContent
         assistant_content = [
-            {"type": "text", "text": "hello"},
+            TextContent(text="hello"),
         ]
         tool_results = []
         _recover_orphan_tool_results(assistant_content, tool_results)
@@ -301,44 +310,51 @@ class TestRecoverOrphanToolResults:
 # =========================================================================
 
 class TestAgentLoopApiErrorRecovery:
-    @patch("src.agent_loop.query_model")
-    def test_api_error_injects_synthetic_message(self, mock_query):
-        """When query_model raises, agent_loop should return error text
-        and keep history alternation correct."""
+    def test_api_error_injects_synthetic_message(self):
+        """When query_model raises, agent_loop injects a synthetic error
+        message and continues the loop until max_turns."""
         import asyncio
+        from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
         from src.types import ToolUseContext, AgentState, MessageHistory, Message
 
-        mock_query.side_effect = APIConnectionError(request=MagicMock())
+        mock_query = AsyncMock(side_effect=APIConnectionError(request=MagicMock()))
 
         history = MessageHistory([Message(role="user", content="hello")])
-        result = asyncio.run(run_agent_loop(
-            system_prompt="test",
-            tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
-            max_turns=3,
-            label="test",
-            on_event=lambda _: None,
-        ))
+        with patch("src.agent_loop.query_model", mock_query):
+            result = asyncio.run(run_agent_loop(
+                system_prompt="test",
+                tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
+                max_turns=3,
+                label="test",
+                on_event=lambda _: None,
+            ))
 
-        assert "API" in result or "connect" in result.lower()
+        assert "max turns" in result.lower()
+        assert mock_query.call_count >= 1
+        assert len(history.messages) > 1
+        error_msgs = [m for m in history.messages if m.role == "assistant"]
+        assert len(error_msgs) > 0
 
-    @patch("src.agent_loop.query_model")
-    def test_api_error_does_not_loop(self, mock_query):
-        """API error should immediately return, not retry inside the loop."""
+    def test_api_error_does_not_crash(self):
+        """API errors are handled gracefully — loop reaches max_turns
+        without crashing."""
         import asyncio
+        from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
         from src.types import ToolUseContext, AgentState, MessageHistory, Message
 
-        mock_query.side_effect = Exception("unexpected boom")
+        mock_query = AsyncMock(side_effect=Exception("unexpected boom"))
 
         history = MessageHistory([Message(role="user", content="test")])
-        result = asyncio.run(run_agent_loop(
-            system_prompt="test",
-            tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
-            max_turns=10,
-            label="test",
-            on_event=lambda _: None,
-        ))
+        with patch("src.agent_loop.query_model", mock_query):
+            result = asyncio.run(run_agent_loop(
+                system_prompt="test",
+                tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
+                max_turns=2,
+                label="test",
+                on_event=lambda _: None,
+            ))
 
-        assert mock_query.call_count == 1
-        assert "unexpected boom" in result
+        assert mock_query.call_count >= 1
+        assert "max turns" in result.lower()

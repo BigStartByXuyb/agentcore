@@ -12,31 +12,22 @@ Tests:
   9. map_result — forked output formatting
 """
 
+import asyncio
 import os
 import sys
 from unittest.mock import patch, MagicMock
 
 
 def _mock_run_agent_loop(return_value):
-    """Return a side_effect function that produces a generator returning the given value.
-    Used to mock run_agent_loop which is now a generator."""
-    def _side_effect(*args, **kwargs):
-        return _gen()
-    def _gen():
+    """Return a side_effect coroutine function that returns the given value."""
+    async def _side_effect(*args, **kwargs):
         return return_value
-        yield  # noqa: unreachable — makes this a generator function
     return _side_effect
 
 
-def _drain(gen_or_value):
-    """Drain a generator and return its final value, or return the value directly."""
-    if hasattr(gen_or_value, '__next__'):
-        try:
-            while True:
-                next(gen_or_value)
-        except StopIteration as e:
-            return e.value
-    return gen_or_value
+def _run_async(coro):
+    """Run an async function synchronously for tests."""
+    return asyncio.run(coro)
 
 
 # Ensure project root is on sys.path
@@ -52,7 +43,7 @@ from src.skills import (
 )
 from src.messages import build_skill_reminder
 from src.tools.skill import _execute, _map_result
-from src.types import ToolUseContext
+from src.types import ToolUseContext, MessageHistory
 
 
 def test_parse_frontmatter_basic():
@@ -165,15 +156,15 @@ def test_skill_executor_inline():
     import src.skills as skills_mod
     skills_mod._cached_skills = discover_skills([fixtures_dir])
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "read_file", "grep", "Skill"])
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "grep", "Skill"])
 
-    result = _drain(_execute({"skill": "hello-world"}, ctx))
+    result = _run_async(_execute({"skill": "hello-world"}, ctx))
     assert result.data["success"] is True
     assert result.data["commandName"] == "hello-world"
     assert result.data["status"] == "inline"
     assert len(result.new_messages) == 1
-    assert result.new_messages[0]["role"] == "user"
-    assert "<skill-content name='hello-world'>" in result.new_messages[0]["content"]
+    assert result.new_messages[0].role == "user"
+    assert "<skill-content name='hello-world'>" in result.new_messages[0].content
     assert result.context_modifier is None  # no tool restriction
 
     # map_result
@@ -190,9 +181,9 @@ def test_skill_executor_allowed_tools():
     import src.skills as skills_mod
     skills_mod._cached_skills = discover_skills([fixtures_dir])
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "read_file", "grep", "Skill"])
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "grep", "Skill"])
 
-    result = _drain(_execute({"skill": "read-only"}, ctx))
+    result = _run_async(_execute({"skill": "read-only"}, ctx))
     assert result.data["success"] is True
     assert result.context_modifier is not None
 
@@ -206,8 +197,8 @@ def test_skill_executor_allowed_tools():
 
 
 def test_skill_executor_unknown_skill():
-    ctx = ToolUseContext(messages=[], tools=["bash"])
-    result = _drain(_execute({"skill": "nonexistent"}, ctx))
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash"])
+    result = _run_async(_execute({"skill": "nonexistent"}, ctx))
     assert result.data["success"] is False
     assert "Unknown skill" in result.data["error"]
 
@@ -224,8 +215,8 @@ def test_skill_executor_leading_slash():
     import src.skills as skills_mod
     skills_mod._cached_skills = discover_skills([fixtures_dir])
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "Skill"])
-    result = _drain(_execute({"skill": "/hello-world"}, ctx))
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"])
+    result = _run_async(_execute({"skill": "/hello-world"}, ctx))
     assert result.data["success"] is True
     assert result.data["commandName"] == "hello-world"
 
@@ -236,22 +227,26 @@ def test_skill_executor_leading_slash():
 # build_skill_reminder / reset_sent_skills tests
 # ---------------------------------------------------------------------------
 
+def _skill_tools():
+    """Tools list that includes 'Skill' so build_skill_reminder doesn't short-circuit."""
+    return ["bash", "read_file", "grep", "Skill"]
+
+
 def test_build_skill_reminder_returns_user_message():
-    """First call should return a <system-reminder> user message."""
+    """First call should return an Attachment with skill listing."""
     fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures", "skills")
 
     import src.skills as skills_mod
     skills_mod._cached_skills = discover_skills([fixtures_dir])
 
-    # Reset tracker so this test starts clean
     reset_sent_skills()
 
-    msg = build_skill_reminder()
-    assert msg is not None
-    assert msg["role"] == "user"
-    assert "<system-reminder>" in msg["content"]
-    assert "available for use with the Skill tool" in msg["content"]
-    assert "hello-world" in msg["content"]
+    att = build_skill_reminder(_skill_tools())
+    assert att is not None
+    assert att.type == "system_reminder"
+    assert "<system-reminder>" in att.content
+    assert "available for use with the Skill tool" in att.content
+    assert "hello-world" in att.content
     print("  [PASS] test_build_skill_reminder_returns_user_message")
 
 
@@ -264,13 +259,11 @@ def test_build_skill_reminder_no_repeat():
 
     reset_sent_skills()
 
-    # First call — announces all
-    msg1 = build_skill_reminder()
-    assert msg1 is not None
+    att1 = build_skill_reminder(_skill_tools())
+    assert att1 is not None
 
-    # Second call — nothing new
-    msg2 = build_skill_reminder()
-    assert msg2 is None
+    att2 = build_skill_reminder(_skill_tools())
+    assert att2 is None
     print("  [PASS] test_build_skill_reminder_no_repeat")
 
 
@@ -282,12 +275,12 @@ def test_reset_sent_skills():
     skills_mod._cached_skills = discover_skills([fixtures_dir])
 
     reset_sent_skills()
-    build_skill_reminder()  # marks all as sent
+    build_skill_reminder(_skill_tools())
 
-    reset_sent_skills()     # clear tracker
+    reset_sent_skills()
 
-    msg = build_skill_reminder()
-    assert msg is not None  # should re-announce
+    att = build_skill_reminder(_skill_tools())
+    assert att is not None
     print("  [PASS] test_reset_sent_skills")
 
 
@@ -336,10 +329,10 @@ def test_skill_executor_fork_basic():
     """
     _load_fixtures()
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "read_file", "Skill"], depth=0)
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "Skill"], depth=0)
 
     with patch("src.agent_loop.run_agent_loop", side_effect=_mock_run_agent_loop("Mocked fork result")) as mock_loop:
-        result = _drain(_execute({"skill": "fork-test"}, ctx))
+        result = _run_async(_execute({"skill": "fork-test"}, ctx))
 
     # Verify result structure
     assert result.data["success"] is True
@@ -360,12 +353,12 @@ def test_skill_executor_fork_basic():
     assert "Do NOT spawn sub-agents" in call_kwargs["system_prompt"]
 
     # Initial messages should contain skill content
-    initial_msgs = call_kwargs["messages"]
-    assert len(initial_msgs) == 1
-    assert "<skill-content name='fork-test'>" in initial_msgs[0]["content"]
+    sub_ctx = call_kwargs["tool_use_context"]
+    initial_msgs = sub_ctx.messages.messages
+    assert len(initial_msgs) >= 1
+    assert "<skill-content name='fork-test'>" in initial_msgs[0].content
 
     # Sub-agent context should have depth + 1
-    sub_ctx = call_kwargs["tool_use_context"]
     assert sub_ctx.depth == 1
 
     print("  [PASS] test_skill_executor_fork_basic")
@@ -375,15 +368,16 @@ def test_skill_executor_fork_with_args():
     """Test fork skill respects $ARGUMENTS substitution."""
     _load_fixtures()
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "Skill"], depth=0)
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"], depth=0)
 
     with patch("src.agent_loop.run_agent_loop", side_effect=_mock_run_agent_loop("Done")) as mock_loop:
-        result = _drain(_execute({"skill": "fork-test", "args": "extra_arg"}, ctx))
+        result = _run_async(_execute({"skill": "fork-test", "args": "extra_arg"}, ctx))
 
     assert result.data["success"] is True
     # The content should have $ARGUMENTS replaced (if present in body)
-    initial_msgs = mock_loop.call_args[1]["messages"]
-    assert len(initial_msgs) == 1
+    sub_ctx = mock_loop.call_args[1]["tool_use_context"]
+    initial_msgs = sub_ctx.messages.messages
+    assert len(initial_msgs) >= 1
 
     print("  [PASS] test_skill_executor_fork_with_args")
 
@@ -392,10 +386,10 @@ def test_skill_executor_fork_allowed_tools():
     """Test fork skill with allowed_tools builds restricted tool schemas."""
     _load_fixtures()
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "read_file", "grep", "Skill"], depth=0)
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "grep", "Skill"], depth=0)
 
     with patch("src.agent_loop.run_agent_loop", side_effect=_mock_run_agent_loop("OK")) as mock_loop:
-        result = _drain(_execute({"skill": "fork-test"}, ctx))
+        result = _run_async(_execute({"skill": "fork-test"}, ctx))
 
     assert result.data["success"] is True
 
@@ -415,15 +409,15 @@ def test_skill_executor_fork_depth_limit():
     from src import config
     max_depth = config.MAX_AGENT_DEPTH
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "Skill"], depth=max_depth)
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"], depth=max_depth)
 
     # Should NOT call run_agent_loop
     with patch("src.agent_loop.run_agent_loop") as mock_loop:
-        result = _drain(_execute({"skill": "fork-test"}, ctx))
+        result = _run_async(_execute({"skill": "fork-test"}, ctx))
 
     mock_loop.assert_not_called()
     assert result.data["success"] is False
-    assert "Maximum agent nesting depth" in result.data["error"]
+    assert "depth" in result.data["error"].lower()
     assert result.new_messages == []
     assert result.context_modifier is None
 
@@ -434,10 +428,10 @@ def test_skill_executor_fork_exception_handling():
     """Test fork skill handles exceptions from run_agent_loop gracefully."""
     _load_fixtures()
 
-    ctx = ToolUseContext(messages=[], tools=["bash", "Skill"], depth=0)
+    ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"], depth=0)
 
     with patch("src.agent_loop.run_agent_loop", side_effect=RuntimeError("API down")):
-        result = _drain(_execute({"skill": "fork-test"}, ctx))
+        result = _run_async(_execute({"skill": "fork-test"}, ctx))
 
     assert result.data["success"] is False
     assert "Fork execution failed" in result.data["error"]

@@ -39,12 +39,16 @@ from src.errors import create_assistant_error_message
 from src.events import (
     AgentEvent, TextDelta, TextBlock, ThinkingBlock, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
+    CompactCircuitBreaker, BlockingLimitReached,
 )
 from src.display import make_interactive_handler, default_handler
 from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
 from src.compact.micro_compact import should_micro_compact, micro_compact
-from src.compact.auto_compact import should_auto_compact, auto_compact, estimate_token_count
+from src.compact.auto_compact import (
+    should_auto_compact, auto_compact, estimate_token_count,
+    is_at_blocking_limit, MAX_CONSECUTIVE_COMPACT_FAILURES,
+)
 from src.task_store import TaskStore
 
 logger = logging.getLogger(__name__)
@@ -250,21 +254,38 @@ async def run_agent_loop(
                 last_msg = tool_use_context.messages.last_user_message()
                 if last_msg is not None:
                     last_msg.attach([mem])
+        cache = tool_use_context.file_state_cache
+
         # --- Micro Compact: clear old tool_result content before API call ---
         if should_micro_compact(history.messages):
             micro_compact(history.messages)
 
         # --- Auto Compact: full LLM summarization if near context limit ---
-        if should_auto_compact(estimate_token_count(history, _state)):
-            cache = tool_use_context.file_state_cache
-            file_snapshot = cache.snapshot() if cache is not None else {}
-            if await auto_compact(history):
-                if cache is not None:
-                    cache.clear()
-                _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+        estimated = estimate_token_count(history, _state)
+        if should_auto_compact(estimated):
+            if _state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
+                pass  # circuit breaker open — skip auto compact
+            else:
+                file_snapshot = cache.snapshot() if cache is not None else {}
+                try:
+                    ok = await auto_compact(history)
+                except Exception:
+                    ok = False
+                if ok:
+                    _state.compact_consecutive_failures = 0
+                    if cache is not None:
+                        cache.clear()
+                    _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+                else:
+                    _state.compact_consecutive_failures += 1
+                    if _state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
+                        on_event(CompactCircuitBreaker(
+                            label=label,
+                            failures=_state.compact_consecutive_failures,
+                            message="Auto-compact failed 3 consecutive times. Use /compact or /clear.",
+                        ))
 
         # --- Changed files: detect external modifications and inject diffs ---
-        cache = tool_use_context.file_state_cache
         changed_atts = cache.get_changed_files() if cache is not None else []
         if changed_atts:
             last_user = history.last_user_message()
@@ -298,6 +319,15 @@ async def run_agent_loop(
                 last_user.attach([reminder])
             _state.turns_since_task_reminder = 0
 
+        # --- Blocking limit: refuse to call API if context nearly full ---
+        if is_at_blocking_limit(estimate_token_count(history, _state)):
+            on_event(BlockingLimitReached(
+                label=label,
+                estimated_tokens=estimate_token_count(history, _state),
+                message="Context window nearly full. Use /compact or /clear.",
+            ))
+            return "[Error] Context window nearly full. Use /compact or /clear."
+
         tools = build_tool_schemas(
             tool_registry,
             allowed_tools=tool_use_context.tools,
@@ -308,7 +338,7 @@ async def run_agent_loop(
         # --- Call LLM ---
         streaming_executor: StreamingToolExecutor | None = None
 
-        async def _call_llm():
+        async def _call_llm() -> anthropic.types.Message:
             nonlocal streaming_executor
             if stream:
                 streaming_executor = StreamingToolExecutor(label, tool_use_context, on_event)
@@ -329,42 +359,49 @@ async def run_agent_loop(
             history.add_assistant([TextContent(text=error_text)])
             on_event(ErrorEvent(label=label, error_text=error_text))
 
+        response: anthropic.types.Message | None = None
         try:
             response = await _call_llm()
         except Exception as api_error:
             for ev in pending_retry_events:
                 on_event(ev)
 
-            # Layer 3: reactive compact on prompt_too_long
+            # Layer 3: reactive compact on prompt_too_long (bypasses circuit breaker)
             if _is_prompt_too_long(api_error):
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
-                cache = tool_use_context.file_state_cache
                 file_snapshot = cache.snapshot() if cache is not None else {}
                 if await auto_compact(history):
+                    _state.compact_consecutive_failures = 0
                     if cache is not None:
                         cache.clear()
                     _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
                     continue
+                else:
+                    _state.compact_consecutive_failures += 1
 
+            final_error: Exception | None = api_error
             if _is_thinking_400(api_error) and thinking is not None:
                 on_event(Recovery(label=label, message="Stripping thinking blocks and retrying..."))
                 _clean_thinking_history(history.messages)
                 pending_retry_events.clear()
                 try:
                     response = await _call_llm()
+                    final_error = None
                 except Exception as retry_error:
                     for ev in pending_retry_events:
                         on_event(ev)
-                    _emit_error(retry_error)
-                    continue
-            else:
-                _emit_error(api_error)
+                    final_error = retry_error
+
+            if final_error is not None:
+                _emit_error(final_error)
                 continue
 
         for ev in pending_retry_events:
             on_event(ev)
 
-        # Track token usage
+        # Track token usage — response is guaranteed bound here:
+        # all error paths in the except block end with `continue`.
+        assert response is not None
         _state.total_input_tokens += response.usage.input_tokens
         _state.total_output_tokens += response.usage.output_tokens
         thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
@@ -438,10 +475,10 @@ async def agent_loop(
         a = build_agent_reminder(main_tools, use_sent_tracking=True)
         m = build_memory_index_reminder()
         parts: list[Attachment | None] = [s, a, m]
-        if state.plan_phase == PlanPhase.ACTIVE:
+        if state.plan_phase == PlanPhase.ACTIVE and state.plan_file_path is not None:
             from src.plan_mode import build_plan_mode_attachment
             parts.append(build_plan_mode_attachment(state.plan_file_path))
-        elif state.plan_phase == PlanPhase.EXITING:
+        elif state.plan_phase == PlanPhase.EXITING and state.plan_file_path is not None:
             from src.plan_mode import build_plan_exit_attachment
             parts.append(build_plan_exit_attachment(state.plan_file_path))
             state.plan_phase = PlanPhase.INACTIVE

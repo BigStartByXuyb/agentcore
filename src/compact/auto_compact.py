@@ -8,6 +8,9 @@ Trigger order per API call:
   2. estimate tokens
   3. auto_compact if over threshold (Layer 2, lossy)
 
+Includes truncate-head retry for when the compaction LLM call itself
+exceeds the context window (prompt_too_long on side_query).
+
 Corresponds to Claude Code's src/services/compact/compactHistory.ts.
 """
 
@@ -18,11 +21,14 @@ import logging
 from src import config
 from src.api import side_query
 from src.compact.prompt import get_compact_prompt, get_compact_user_summary
-from src.types import MessageHistory, AgentState
+from src.compact.grouping import truncate_head, MAX_PTL_RETRIES
+from src.types import MessageHistory, Message, AgentState
 
 logger = logging.getLogger(__name__)
 
 AUTOCOMPACT_BUFFER_TOKENS = 13_000
+MAX_CONSECUTIVE_COMPACT_FAILURES = 3
+BLOCKING_LIMIT_BUFFER_TOKENS = 3_000
 
 
 def estimate_token_count(history: MessageHistory, state: AgentState | None = None) -> int:
@@ -63,8 +69,27 @@ def should_auto_compact(estimated_tokens: int) -> bool:
     return estimated_tokens >= threshold
 
 
+def is_at_blocking_limit(estimated_tokens: int) -> bool:
+    """Check if tokens are at the hard limit — too dangerous to call API."""
+    return estimated_tokens >= config.MAX_CONTEXT_WINDOW - BLOCKING_LIMIT_BUFFER_TOKENS
+
+
+def _is_prompt_too_long(error: Exception) -> bool:
+    """Detect prompt_too_long errors from side_query."""
+    msg = str(error).lower()
+    return "prompt is too long" in msg or "prompt_too_long" in msg
+
+
+def _messages_to_api_format(messages: list[Message]) -> list[dict]:
+    """Convert Message objects to raw API dicts, reusing MessageHistory's logic."""
+    return MessageHistory(messages=messages).normalized_for_api()
+
+
 async def auto_compact(history: MessageHistory) -> bool:
-    """Full compact: summarize ALL messages, replace with single summary.
+    """Full compact with truncate-head retry on prompt_too_long.
+
+    If the compaction side_query itself gets prompt_too_long, drops the
+    oldest 20% of message groups and retries (up to MAX_PTL_RETRIES times).
 
     Returns True if compaction was performed, False otherwise.
     """
@@ -72,28 +97,49 @@ async def auto_compact(history: MessageHistory) -> bool:
     if not messages_for_api:
         return False
 
-    response = await side_query(
-        model=config.MEMORY_SIDE_QUERY_MODEL,
-        system=get_compact_prompt(),
-        messages=messages_for_api,
-        max_tokens=config.AUTO_COMPACT_MAX_TOKENS,
-    )
+    source_messages = list(history.messages)
 
-    if not response or not response.content:
-        logger.warning("Auto compact: LLM returned empty response")
-        return False
+    for attempt in range(MAX_PTL_RETRIES + 1):
+        try:
+            response = await side_query(
+                model=config.MEMORY_SIDE_QUERY_MODEL,
+                system=get_compact_prompt(),
+                messages=messages_for_api,
+                max_tokens=config.AUTO_COMPACT_MAX_TOKENS,
+            )
+        except Exception as e:
+            if _is_prompt_too_long(e) and attempt < MAX_PTL_RETRIES:
+                truncated = truncate_head(source_messages)
+                if truncated is None:
+                    logger.warning("Auto compact: cannot truncate further, giving up")
+                    return False
+                source_messages = truncated
+                messages_for_api = _messages_to_api_format(source_messages)
+                logger.info(
+                    "Auto compact: prompt too long, truncated to %d messages (attempt %d/%d)",
+                    len(source_messages), attempt + 1, MAX_PTL_RETRIES,
+                )
+                continue
+            logger.warning("Auto compact: side_query failed: %s", e)
+            return False
 
-    raw_text = ""
-    for block in response.content:
-        if block.type == "text":
-            raw_text += block.text
+        if not response or not response.content:
+            logger.warning("Auto compact: LLM returned empty response")
+            return False
 
-    if not raw_text.strip():
-        logger.warning("Auto compact: LLM returned no text content")
-        return False
+        raw_text = ""
+        for block in response.content:
+            if block.type == "text":
+                raw_text += block.text
 
-    summary_text = get_compact_user_summary(raw_text, suppress_follow_up=True)
-    history.replace_with_summary(summary_text)
+        if not raw_text.strip():
+            logger.warning("Auto compact: LLM returned no text content")
+            return False
 
-    logger.info("Auto compact: replaced %d messages with summary", len(messages_for_api))
-    return True
+        summary_text = get_compact_user_summary(raw_text, suppress_follow_up=True)
+        history.replace_with_summary(summary_text)
+
+        logger.info("Auto compact: replaced %d messages with summary", len(messages_for_api))
+        return True
+
+    return False

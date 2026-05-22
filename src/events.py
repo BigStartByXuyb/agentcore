@@ -155,6 +155,24 @@ class PermissionDenied(AgentEvent):
 # User interaction events
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Compact events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CompactCircuitBreaker(AgentEvent):
+    """Auto-compact circuit breaker triggered after consecutive failures."""
+    failures: int = 0
+    message: str = ""
+
+
+@dataclass
+class BlockingLimitReached(AgentEvent):
+    """Context window hard limit reached — cannot call API."""
+    estimated_tokens: int = 0
+    message: str = ""
+
+
 @dataclass
 class UserQuestionRequest(AgentEvent):
     """LLM is asking the user a structured question — consumer fills the Future.

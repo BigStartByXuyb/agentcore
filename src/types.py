@@ -459,6 +459,7 @@ class AgentState:
     plan_file_path: str | None = None
     turns_since_task_write: int = 0
     turns_since_task_reminder: int = 0
+    compact_consecutive_failures: int = 0
     _task_store: Any | None = field(default=None, repr=False)
 
 

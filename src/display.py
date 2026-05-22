@@ -27,6 +27,8 @@ from src.events import (
     SubAgentEnd,
     PermissionRequest,
     PermissionDenied,
+    CompactCircuitBreaker,
+    BlockingLimitReached,
     UserQuestionRequest,
 )
 
@@ -96,6 +98,12 @@ def default_handler(event: AgentEvent) -> None:
 
     elif isinstance(event, PermissionDenied):
         print(f"\n  [{label}:denied] {event.tool_name}: {event.message}")
+
+    elif isinstance(event, CompactCircuitBreaker):
+        print(f"\n  [{label}:warning] {event.message}")
+
+    elif isinstance(event, BlockingLimitReached):
+        print(f"\n  [{label}:error] {event.message}")
 
 
 # ---------------------------------------------------------------------------

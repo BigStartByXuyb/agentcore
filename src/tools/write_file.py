@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 from src.types import ToolResult, ToolDef, ToolUseContext
@@ -31,12 +30,56 @@ SCHEMA: dict = {
 }
 
 
-def _write_sync(file_path: str, content: str, encoding: str = "utf-8") -> int:
-    """Blocking I/O helper — returns bytes written."""
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+class _StaleFileError(Exception):
+    pass
+
+
+def _check_and_write_sync(
+    abs_path: str,
+    content: str,
+    cached_mtime: float | None,
+    cached_content: str | None,
+    cached_is_full_read: bool,
+) -> tuple[int, float]:
+    """Critical section: stale check + detect encoding + write. Runs in one thread.
+
+    No async yield between check and write — prevents TOCTOU race.
+    Mirrors Claude Code's approach (FileWriteTool.ts:267 comment:
+    "Please avoid async operations between here and writing to disk
+    to preserve atomicity.")
+    """
     from src.utils.file_encoding import write_text_content
-    write_text_content(file_path, content, encoding, "LF")
-    return len(content)
+
+    if cached_mtime is not None and os.path.exists(abs_path):
+        try:
+            disk_mtime = os.path.getmtime(abs_path)
+            if disk_mtime > cached_mtime:
+                content_unchanged = False
+                if cached_is_full_read and cached_content is not None:
+                    try:
+                        from src.utils.file_encoding import read_file_streaming
+                        lines, _, _ = read_file_streaming(abs_path)
+                        content_unchanged = "\n".join(lines) == cached_content
+                    except Exception:
+                        pass
+                if not content_unchanged:
+                    raise _StaleFileError(
+                        "File has been externally modified since last read. "
+                        "Read it again before writing."
+                    )
+        except OSError:
+            pass
+
+    enc = "utf-8"
+    if os.path.isfile(abs_path):
+        from src.utils.file_encoding import detect_encoding
+        enc = detect_encoding(abs_path)
+
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    write_text_content(abs_path, content, enc, "LF")
+
+    new_mtime = os.path.getmtime(abs_path)
+    return len(content), new_mtime
 
 
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
@@ -46,7 +89,12 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     abs_path = os.path.normpath(os.path.abspath(file_path))
     cache = context.file_state_cache
 
-    # --- stale check: reject if file was externally modified since last read ---
+    # Fast pre-check: must have been read first.
+    # mtime + content comparison is done inside the critical section
+    # (which also has content fallback for Windows mtime false positives).
+    cached_mtime: float | None = None
+    cached_content: str | None = None
+    cached_is_full_read = False
     if cache is not None and os.path.exists(abs_path):
         cached = cache.get(abs_path)
         if not cached or cached.isPartialView:
@@ -54,56 +102,26 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
                 "type": "error",
                 "content": "File has not been read yet. Read it first before writing to it.",
             })
-        try:
-            disk_mtime = os.path.getmtime(abs_path)
-            if disk_mtime > cached.mtime:
-                is_full_read = cached.offset is None and cached.limit is None
-                content_unchanged = False
-                if is_full_read:
-                    try:
-                        from src.utils.file_encoding import read_file_streaming
-                        lines, _, _ = read_file_streaming(abs_path)
-                        disk_content = "\n".join(lines)
-                        content_unchanged = disk_content == cached.content
-                    except Exception:
-                        pass
-                if not content_unchanged:
-                    return ToolResult(data={
-                        "type": "error",
-                        "content": (
-                            "File has been externally modified since last read. "
-                            "Read it again before writing."
-                        ),
-                    })
-        except OSError:
-            pass
+        cached_mtime = cached.mtime
+        cached_content = cached.content
+        cached_is_full_read = cached.offset is None and cached.limit is None
 
-    # Preserve encoding if overwriting an existing file (e.g. UTF-16 LE stays UTF-16 LE).
-    # New files default to UTF-8.
-    enc = "utf-8"
-    if os.path.isfile(abs_path):
-        from src.utils.file_encoding import detect_encoding
-        enc = await asyncio.to_thread(detect_encoding, abs_path)
-
+    # Critical section: stale check + write, fully synchronous (no await).
+    # Blocks the event loop briefly (<1ms for typical files), but guarantees
+    # no other coroutine can interleave between check and write.
     try:
-        chars = await asyncio.to_thread(_write_sync, abs_path, content, enc)
+        chars, new_mtime = _check_and_write_sync(
+            abs_path, content,
+            cached_mtime, cached_content, cached_is_full_read,
+        )
+    except _StaleFileError as e:
+        return ToolResult(data={"type": "error", "content": str(e)})
     except Exception as e:
-        return ToolResult(data={
-            "type": "error",
-            "content": f"Error writing file: {e}",
-        })
+        return ToolResult(data={"type": "error", "content": f"Error writing file: {e}"})
 
-    # --- update cache: record written content + new mtime ---
     if cache is not None:
-        try:
-            mtime = os.path.getmtime(abs_path)
-        except OSError:
-            mtime = 0.0
         cache.set(abs_path, FileState(
-            content=content,
-            mtime=mtime,
-            offset=None,
-            limit=None,
+            content=content, mtime=new_mtime, offset=None, limit=None,
         ))
 
     return ToolResult(data={

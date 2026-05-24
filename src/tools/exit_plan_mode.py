@@ -16,9 +16,14 @@ from src.types import ToolDef, ToolPermissionResult, ToolResult, ToolUseContext
 SCHEMA: dict = {
     "name": "ExitPlanMode",
     "description": (
-        "Call this tool when you have finished writing your plan to the plan file. "
-        "This will submit the plan for user review and approval. "
-        "Do NOT call this until your plan is complete."
+        "Submit your completed plan for user review and approval. "
+        "ONLY call this after ALL plan mode phases are complete: "
+        "(1) you explored the codebase with Explore agents and/or read_file to understand the relevant code, "
+        "(2) you asked clarifying questions via AskUserQuestion if anything was ambiguous, "
+        "(3) you wrote a full plan to the plan file with all required sections "
+        "(Context, files to modify, implementation steps, verification), and "
+        "(4) you reviewed the plan against the actual codebase for accuracy. "
+        "Do NOT call this prematurely — a shallow plan that just restates the task will be rejected."
     ),
     "input_schema": {
         "type": "object",

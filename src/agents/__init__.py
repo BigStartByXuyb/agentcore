@@ -70,9 +70,11 @@ class AgentDefinition:
 # ---------------------------------------------------------------------------
 
 from src.agents.explore import explore_agent  # noqa: E402
+from src.agents.plan import plan_agent  # noqa: E402
 
 _BUILTIN_AGENTS: dict[str, AgentDefinition] = {
     explore_agent.name.lower(): explore_agent,
+    plan_agent.name.lower(): plan_agent,
 }
 
 

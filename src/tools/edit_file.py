@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
+from dataclasses import dataclass
 
 from src.types import ToolResult, ToolDef, ToolUseContext
 from src.utils.file_state_cache import FileState
@@ -107,9 +107,98 @@ SCHEMA: dict = {
 }
 
 
-def _write_file_sync(file_path: str, content: str, encoding: str = "utf-8", line_endings: str = "LF") -> None:
+class _StaleFileError(Exception):
+    pass
+
+
+class _EditError(Exception):
+    """Non-stale edit failures (no match, multiple matches)."""
+    pass
+
+
+@dataclass
+class _EditSyncResult:
+    updated: str
+    match_count: int
+    adjusted_new: str
+    quote_normalized: bool
+    new_mtime: float
+
+
+def _read_check_edit_write_sync(
+    abs_path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool,
+    cached_mtime: float | None,
+    cached_content: str | None,
+    cached_is_full_read: bool,
+) -> _EditSyncResult:
+    """Critical section: read + stale check + edit + write. Runs in one thread.
+
+    No async yield between check and write — prevents TOCTOU race.
+    """
+    from src.utils.file_encoding import read_file_with_metadata, write_text_content
+
+    original, file_encoding, file_line_endings = read_file_with_metadata(abs_path)
+
+    if cached_mtime is not None:
+        try:
+            disk_mtime = os.path.getmtime(abs_path)
+            if disk_mtime > cached_mtime:
+                if cached_is_full_read and cached_content is not None:
+                    disk_content = "\n".join(original.splitlines())
+                    if disk_content != cached_content:
+                        raise _StaleFileError(
+                            "File has been externally modified since last read. "
+                            "Read it again before editing."
+                        )
+                else:
+                    raise _StaleFileError(
+                        "File has been externally modified since last read. "
+                        "Read it again before editing."
+                    )
+        except OSError:
+            pass
+
+    match_count = original.count(old_string)
+    actual_old = old_string
+    adjusted_new = new_string
+    quote_normalized = False
+
+    if match_count == 0:
+        found = _find_actual_string(original, old_string)
+        if found is None:
+            raise _EditError(f"old_string not found in file.\nString: {old_string}")
+        actual_old = found
+        match_count = original.count(actual_old)
+        adjusted_new = _preserve_quote_style(old_string, actual_old, new_string)
+        quote_normalized = True
+
+    if match_count > 1 and not replace_all:
+        raise _EditError(
+            f"Found {match_count} matches of old_string, but replace_all is false. "
+            "Provide more surrounding context to uniquely identify the instance, "
+            "or set replace_all to true."
+        )
+
+    if replace_all:
+        updated = original.replace(actual_old, adjusted_new)
+    else:
+        updated = original.replace(actual_old, adjusted_new, 1)
+
+    write_text_content(abs_path, updated, file_encoding, file_line_endings)
+
+    new_mtime = os.path.getmtime(abs_path)
+    return _EditSyncResult(updated, match_count, adjusted_new, quote_normalized, new_mtime)
+
+
+def _create_file_sync(abs_path: str, content: str) -> float:
+    """Create a new file. Returns mtime."""
     from src.utils.file_encoding import write_text_content
-    write_text_content(file_path, content, encoding, line_endings)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    write_text_content(abs_path, content, "utf-8", "LF")
+    return os.path.getmtime(abs_path)
 
 
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
@@ -127,18 +216,14 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "content": "old_string and new_string are identical. No changes to make.",
         })
 
+    # --- Create new file (old_string="" on non-existent file) ---
     if not os.path.isfile(abs_path):
         if old_string == "":
             try:
-                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                await asyncio.to_thread(_write_file_sync, abs_path, new_string)
+                mtime = _create_file_sync(abs_path, new_string)
             except Exception as e:
                 return ToolResult(data={"type": "error", "content": f"Error creating file: {e}"})
             if cache is not None:
-                try:
-                    mtime = os.path.getmtime(abs_path)
-                except OSError:
-                    mtime = 0.0
                 cache.set(abs_path, FileState(content=new_string, mtime=mtime, offset=None, limit=None))
             return ToolResult(data={
                 "type": "success",
@@ -150,16 +235,11 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             "content": f"File not found: {file_path}",
         })
 
-    # --- read current content (single read for both stale check and replacement) ---
-    try:
-        from src.utils.file_encoding import read_file_with_metadata
-        original, file_encoding, file_line_endings = await asyncio.to_thread(
-            read_file_with_metadata, abs_path,
-        )
-    except Exception as e:
-        return ToolResult(data={"type": "error", "content": f"Error reading file: {e}"})
-
-    # --- stale check ---
+    # Fast pre-check: must have been read first.
+    # mtime + content comparison is done inside the critical section.
+    cached_mtime: float | None = None
+    cached_content: str | None = None
+    cached_is_full_read = False
     if cache is not None:
         cached = cache.get(abs_path)
         if not cached or cached.isPartialView:
@@ -167,76 +247,30 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
                 "type": "error",
                 "content": "File has not been read yet. Read it first before editing.",
             })
-        try:
-            disk_mtime = os.path.getmtime(abs_path)
-            if disk_mtime > cached.mtime:
-                is_full_read = cached.offset is None and cached.limit is None
-                if is_full_read:
-                    disk_content = "\n".join(original.splitlines())
-                    if disk_content != cached.content:
-                        return ToolResult(data={
-                            "type": "error",
-                            "content": "File has been externally modified since last read. Read it again before editing.",
-                        })
-                else:
-                    return ToolResult(data={
-                        "type": "error",
-                        "content": "File has been externally modified since last read. Read it again before editing.",
-                    })
-        except OSError:
-            pass
+        cached_mtime = cached.mtime
+        cached_content = cached.content
+        cached_is_full_read = cached.offset is None and cached.limit is None
 
-    # --- find matches (with quote normalization fallback) ---
-    match_count = original.count(old_string)
-    actual_old = old_string
-    quote_normalized = False
-
-    if match_count == 0:
-        found = _find_actual_string(original, old_string)
-        if found is None:
-            return ToolResult(data={
-                "type": "error",
-                "content": f"old_string not found in file.\nString: {old_string}",
-            })
-        actual_old = found
-        match_count = original.count(actual_old)
-        new_string = _preserve_quote_style(old_string, actual_old, new_string)
-        quote_normalized = True
-
-    if match_count > 1 and not replace_all:
-        return ToolResult(data={
-            "type": "error",
-            "content": (
-                f"Found {match_count} matches of old_string, but replace_all is false. "
-                "Provide more surrounding context to uniquely identify the instance, "
-                "or set replace_all to true."
-            ),
-        })
-
-    # --- apply replacement ---
-    if replace_all:
-        updated = original.replace(actual_old, new_string)
-    else:
-        updated = original.replace(actual_old, new_string, 1)
-
-    # --- write back (preserve original encoding + line endings) ---
+    # Critical section: read + stale check + edit + write, fully synchronous.
+    # Blocks the event loop briefly, but guarantees no interleaving.
     try:
-        await asyncio.to_thread(_write_file_sync, abs_path, updated, file_encoding, file_line_endings)
+        r = _read_check_edit_write_sync(
+            abs_path, old_string, new_string,
+            replace_all, cached_mtime, cached_content, cached_is_full_read,
+        )
+    except _StaleFileError as e:
+        return ToolResult(data={"type": "error", "content": str(e)})
+    except _EditError as e:
+        return ToolResult(data={"type": "error", "content": str(e)})
     except Exception as e:
-        return ToolResult(data={"type": "error", "content": f"Error writing file: {e}"})
+        return ToolResult(data={"type": "error", "content": f"Error editing file: {e}"})
 
-    # --- update cache ---
     if cache is not None:
-        try:
-            mtime = os.path.getmtime(abs_path)
-        except OSError:
-            mtime = 0.0
-        cache.set(abs_path, FileState(content=updated, mtime=mtime, offset=None, limit=None))
+        cache.set(abs_path, FileState(content=r.updated, mtime=r.new_mtime, offset=None, limit=None))
 
-    # --- build summary ---
     old_lines = old_string.count("\n") + 1
-    new_lines = new_string.count("\n") + 1
-    replacements = match_count if replace_all else 1
+    new_lines = r.adjusted_new.count("\n") + 1
+    replacements = r.match_count if replace_all else 1
 
     return ToolResult(data={
         "type": "success",
@@ -244,9 +278,9 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
         "replacements": replacements,
         "old_lines": old_lines,
         "new_lines": new_lines,
-        "quote_normalized": quote_normalized,
+        "quote_normalized": r.quote_normalized,
         "old_snippet": _make_snippet(old_string),
-        "new_snippet": _make_snippet(new_string),
+        "new_snippet": _make_snippet(r.adjusted_new),
     })
 
 

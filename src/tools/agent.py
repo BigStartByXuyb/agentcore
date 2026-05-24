@@ -243,5 +243,5 @@ tool = ToolDef(
     schema=AGENT_SCHEMA,
     executor=_execute,
     map_result=_map_result,
-    is_read_only=lambda _: False,
+    is_read_only=lambda _: True,
 )

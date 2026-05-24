@@ -30,7 +30,10 @@ class FileState:
     mtime: float
     offset: int | None = None
     limit: int | None = None
-    isPartialView: bool = False
+
+    @property
+    def isPartialView(self) -> bool:
+        return self.offset is not None or self.limit is not None
 
 
 class FileStateCache:

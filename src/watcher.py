@@ -110,10 +110,7 @@ def _reload_agents() -> None:
 
 def _reload_mcp() -> None:
     from src.mcp_tool import reload_mcp_servers
-    try:
-        reload_mcp_servers()
-    except Exception as e:
-        log.error("[watcher] MCP reload failed: %s", e)
+    asyncio.ensure_future(reload_mcp_servers())
 
 
 def _reload_permissions() -> None:

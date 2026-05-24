@@ -1,10 +1,8 @@
-"""Tests for MCP reconnection logic (Claude Code style: passive detection + lazy reconnect)."""
+"""Tests for MCP reconnection logic (Claude Code style: memoize cache + executor retry)."""
 
 from __future__ import annotations
 
 import asyncio
-import threading
-import time
 from unittest import mock
 
 import pytest
@@ -12,7 +10,6 @@ import pytest
 from src.mcp_tool.base import (
     McpClientBase,
     _is_reconnectable_error,
-    MAX_ERRORS_BEFORE_RECONNECT,
 )
 from src.mcp_tool.config import McpServerConfig
 
@@ -28,28 +25,13 @@ def _make_config(name: str = "test-server") -> McpServerConfig:
     )
 
 
-def _make_loop_and_thread():
-    """Start an event loop on a background thread, return (loop, thread)."""
-    loop = asyncio.new_event_loop()
-    t = threading.Thread(target=loop.run_forever, daemon=True)
-    t.start()
-    return loop, t
-
-
-def _stop_loop(loop, thread):
-    loop.call_soon_threadsafe(loop.stop)
-    thread.join(timeout=5)
-
-
 class _DummyClient(McpClientBase):
     """Concrete subclass for testing — _async_lifecycle is controllable."""
 
-    def __init__(self, cfg=None, loop=None):
+    def __init__(self, cfg=None):
         if cfg is None:
             cfg = _make_config()
-        if loop is None:
-            loop = asyncio.new_event_loop()
-        super().__init__(cfg, loop)
+        super().__init__(cfg)
         self.lifecycle_should_fail = False
         self.lifecycle_call_count = 0
 
@@ -129,42 +111,39 @@ class TestStateMachine:
         client = _DummyClient()
         assert client._state == "disconnected"
 
-    def test_start_sets_disconnected(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client.start()
-            assert client._state == "disconnected"
-        finally:
-            _stop_loop(loop, t)
+    @pytest.mark.asyncio
+    async def test_start_sets_disconnected(self):
+        client = _DummyClient()
+        await client.start()
+        assert client._state == "disconnected"
+        await client.close()
 
-    def test_wait_ready_sets_connected(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client.start()
-            client.wait_ready(timeout=5)
-            assert client._state == "connected"
-        finally:
-            client.close()
-            _stop_loop(loop, t)
+    @pytest.mark.asyncio
+    async def test_wait_ready_sets_connected(self):
+        client = _DummyClient()
+        await client.start()
+        await client.wait_ready(timeout=5)
+        assert client._state == "connected"
+        await client.close()
 
-    def test_close_sets_closed(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client.start()
-            client.wait_ready(timeout=5)
-            client.close()
-            assert client._state == "closed"
-        finally:
-            _stop_loop(loop, t)
+    @pytest.mark.asyncio
+    async def test_close_sets_closed(self):
+        client = _DummyClient()
+        await client.start()
+        await client.wait_ready(timeout=5)
+        await client.close()
+        assert client._state == "closed"
 
-    def test_closed_prevents_call(self):
+    @pytest.mark.asyncio
+    async def test_closed_client_call_raises(self):
         client = _DummyClient()
         client._state = "closed"
-        with pytest.raises(RuntimeError, match="is closed"):
-            client.call_tool("test", {})
+        client._session = mock.MagicMock()
+        client._session.call_tool = mock.AsyncMock()
+        # call_tool doesn't check state anymore, but session would be None after close
+        client._session = None
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.call_tool("test", {})
 
 
 # ---------------------------------------------------------------------------
@@ -172,37 +151,30 @@ class TestStateMachine:
 # ---------------------------------------------------------------------------
 
 class TestLifecycleExit:
-    def test_marks_disconnected_when_connected(self):
+    @pytest.mark.asyncio
+    async def test_marks_disconnected_when_connected(self):
         """lifecycle 异常退出时，connected → disconnected。"""
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client.start()
-            client.wait_ready(timeout=5)
-            assert client._state == "connected"
+        client = _DummyClient()
+        await client.start()
+        await client.wait_ready(timeout=5)
+        assert client._state == "connected"
 
-            # 触发 lifecycle 退出
-            loop.call_soon_threadsafe(client._close_event.set)
-            time.sleep(0.5)
+        assert client._close_event is not None
+        client._close_event.set()
+        await asyncio.sleep(0.1)
 
-            assert client._state == "disconnected"
-        finally:
-            _stop_loop(loop, t)
+        assert client._state == "disconnected"
 
-    def test_skips_when_already_closed(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_already_closed(self):
         """手动 close() 后 lifecycle 退出不应改变 closed 状态。"""
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client.start()
-            client.wait_ready(timeout=5)
-            client.close()
-            assert client._state == "closed"
-            # close() 已经触发了 lifecycle 退出，状态应保持 closed
-            time.sleep(0.3)
-            assert client._state == "closed"
-        finally:
-            _stop_loop(loop, t)
+        client = _DummyClient()
+        await client.start()
+        await client.wait_ready(timeout=5)
+        await client.close()
+        assert client._state == "closed"
+        await asyncio.sleep(0.1)
+        assert client._state == "closed"
 
     def test_skips_when_disconnected(self):
         """lifecycle 退出时如果已经是 disconnected，不变。"""
@@ -224,186 +196,244 @@ class TestLifecycleExit:
 
 
 # ---------------------------------------------------------------------------
-# Lazy reconnection: _ensure_connected
+# call_tool / list_tools — direct calls without reconnect
 # ---------------------------------------------------------------------------
 
-class TestEnsureConnected:
-    def test_noop_when_connected(self):
+class TestCallTool:
+    @pytest.mark.asyncio
+    async def test_call_tool_success(self):
         client = _DummyClient()
-        client._state = "connected"
-        client._ensure_connected()
-        assert client.lifecycle_call_count == 0
+        mock_result = mock.MagicMock()
+        mock_session = mock.MagicMock()
+        mock_session.call_tool = mock.AsyncMock(return_value=mock_result)
+        client._session = mock_session
 
-    def test_raises_when_closed(self):
+        result = await client.call_tool("test_tool", {"arg": "val"})
+        assert result == mock_result
+
+    @pytest.mark.asyncio
+    async def test_call_tool_no_session_raises(self):
         client = _DummyClient()
-        client._state = "closed"
-        with pytest.raises(RuntimeError, match="is closed"):
-            client._ensure_connected()
+        client._session = None
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.call_tool("test", {})
 
-    def test_reconnects_when_disconnected(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client._state = "disconnected"
-            client._ensure_connected()
-            assert client._state == "connected"
-            assert client.lifecycle_call_count == 1
-        finally:
-            client.close()
-            _stop_loop(loop, t)
+    @pytest.mark.asyncio
+    async def test_call_tool_error_propagates(self):
+        client = _DummyClient()
+        client._session = mock.MagicMock()
+        client._session.call_tool = mock.AsyncMock(
+            side_effect=ValueError("bad input")
+        )
+        with pytest.raises(ValueError, match="bad input"):
+            await client.call_tool("test", {})
 
-    def test_calls_on_tools_changed(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client._state = "disconnected"
-            callback = mock.MagicMock()
-            client._on_tools_changed = callback
+    @pytest.mark.asyncio
+    async def test_list_tools_success(self):
+        client = _DummyClient()
+        mock_tool = mock.MagicMock()
+        mock_tool.name = "my_tool"
+        mock_tool.description = "A tool"
+        mock_tool.inputSchema = {"type": "object"}
 
-            client._ensure_connected()
+        mock_result = mock.MagicMock()
+        mock_result.tools = [mock_tool]
 
-            assert client._state == "connected"
-            callback.assert_called_once()
-        finally:
-            client.close()
-            _stop_loop(loop, t)
+        mock_session = mock.MagicMock()
+        mock_session.list_tools = mock.AsyncMock(return_value=mock_result)
+        client._session = mock_session
 
-    def test_resets_consecutive_errors(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client._state = "disconnected"
-            client._consecutive_errors = 5
+        result = await client.list_tools()
+        assert "test-server" in result
+        assert len(result["test-server"]) == 1
+        assert result["test-server"][0]["name"] == "my_tool"
 
-            client._ensure_connected()
-
-            assert client._consecutive_errors == 0
-        finally:
-            client.close()
-            _stop_loop(loop, t)
-
-    def test_raises_on_timeout(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client._state = "disconnected"
-            client.lifecycle_should_fail = True
-
-            with pytest.raises((RuntimeError, ConnectionError)):
-                client._ensure_connected()
-        finally:
-            _stop_loop(loop, t)
+    @pytest.mark.asyncio
+    async def test_list_tools_no_session_raises(self):
+        client = _DummyClient()
+        client._session = None
+        with pytest.raises(RuntimeError, match="Session not initialized"):
+            await client.list_tools()
 
 
 # ---------------------------------------------------------------------------
-# _with_reconnect: consecutive error counting
+# Memoize cache: connect_to_server
 # ---------------------------------------------------------------------------
 
-class TestWithReconnect:
-    def test_success_resets_errors(self):
-        client = _DummyClient()
-        client._state = "connected"
-        client._consecutive_errors = 2
+class TestConnectToServer:
+    @pytest.mark.asyncio
+    async def test_cache_returns_same_client(self):
+        """同一 name 多次调用返回同一个 client。"""
+        import src.mcp_tool as mcp_mod
 
-        result = client._with_reconnect(lambda: 42)
+        cfg = _make_config("cache-test")
+        mock_client = _DummyClient(cfg)
 
-        assert result == 42
-        assert client._consecutive_errors == 0
+        async def _fake_create(c):
+            return mock_client
 
-    def test_non_reconnectable_error_raises(self):
-        client = _DummyClient()
-        client._state = "connected"
-
-        with pytest.raises(ValueError, match="bad"):
-            client._with_reconnect(lambda: (_ for _ in ()).throw(ValueError("bad")))
-
-    def test_reconnectable_error_increments_counter(self):
-        client = _DummyClient()
-        client._state = "connected"
-        client._consecutive_errors = 0
-
-        with pytest.raises(Exception, match="ECONNRESET"):
-            client._with_reconnect(lambda: (_ for _ in ()).throw(Exception("ECONNRESET")))
-
-        assert client._consecutive_errors == 1
-
-    def test_threshold_triggers_reconnect_and_retry(self):
-        """达到 MAX_ERRORS_BEFORE_RECONNECT 时标记 disconnected 并重试。"""
-        loop, t = _make_loop_and_thread()
+        original = mcp_mod._create_client
+        mcp_mod._create_client = _fake_create
+        mcp_mod._connection_cache.pop("cache-test", None)
         try:
-            client = _DummyClient(loop=loop)
+            # Patch start/wait_ready since _DummyClient needs lifecycle
+            mock_client._state = "connected"
+            mock_client._lifecycle_task = mock.MagicMock()
+            mock_client._lifecycle_task.add_done_callback = mock.MagicMock()
+
+            c1 = await mcp_mod.connect_to_server("cache-test", cfg)
+            c2 = await mcp_mod.connect_to_server("cache-test", cfg)
+            assert c1 is c2
+        finally:
+            mcp_mod._create_client = original
+            mcp_mod._connection_cache.pop("cache-test", None)
+
+    @pytest.mark.asyncio
+    async def test_invalidate_forces_new_connection(self):
+        """invalidate_connection 后下次调用创建新连接。"""
+        import src.mcp_tool as mcp_mod
+
+        cfg = _make_config("inval-test")
+        call_count = 0
+
+        async def _fake_create(c):
+            nonlocal call_count
+            call_count += 1
+            client = _DummyClient(cfg)
             client._state = "connected"
-            client._consecutive_errors = MAX_ERRORS_BEFORE_RECONNECT - 1
+            client._lifecycle_task = mock.MagicMock()
+            client._lifecycle_task.add_done_callback = mock.MagicMock()
+            return client
 
-            call_count = 0
-            def _fn():
-                nonlocal call_count
-                call_count += 1
-                if call_count == 1:
-                    raise Exception("ECONNRESET")
-                return "ok"
+        original = mcp_mod._create_client
+        mcp_mod._create_client = _fake_create
+        mcp_mod._connection_cache.pop("inval-test", None)
+        try:
+            await mcp_mod.connect_to_server("inval-test", cfg)
+            assert call_count == 1
 
-            result = client._with_reconnect(_fn)
-
-            assert result == "ok"
+            mcp_mod.invalidate_connection("inval-test")
+            await mcp_mod.connect_to_server("inval-test", cfg)
             assert call_count == 2
-            assert client._consecutive_errors == 0
-            assert client._state == "connected"
         finally:
-            client.close()
-            _stop_loop(loop, t)
-
-    def test_below_threshold_raises_without_reconnect(self):
-        """未达到阈值时直接抛出错误，不重连。"""
-        client = _DummyClient()
-        client._state = "connected"
-        client._consecutive_errors = 0
-
-        with pytest.raises(Exception, match="ECONNRESET"):
-            client._with_reconnect(lambda: (_ for _ in ()).throw(Exception("ECONNRESET")))
-
-        assert client._consecutive_errors == 1
-        assert client._state == "connected"
-        assert client.lifecycle_call_count == 0
+            mcp_mod._create_client = original
+            mcp_mod._connection_cache.pop("inval-test", None)
 
 
 # ---------------------------------------------------------------------------
-# Full flow: call_tool with reconnect
+# Executor retry logic
 # ---------------------------------------------------------------------------
 
-class TestCallToolReconnect:
-    def test_call_tool_success(self):
-        loop, t = _make_loop_and_thread()
+class TestExecutorRetry:
+    @pytest.mark.asyncio
+    async def test_retry_on_reconnectable_error(self):
+        """reconnectable error → invalidate same client → retry → success。"""
+        import src.mcp_tool as mcp_mod
+
+        cfg = _make_config("retry-test")
+        call_count = 0
+        bad_client = mock.MagicMock(spec=McpClientBase)
+
+        mock_result = mock.MagicMock()
+        mock_result.content = [mock.MagicMock(text="ok")]
+        mock_result.isError = False
+
+        good_client = mock.MagicMock(spec=McpClientBase)
+        good_client.call_tool = mock.AsyncMock(return_value=mock_result)
+
+        async def _fake_connect(name, c):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                bad_client.call_tool = mock.AsyncMock(
+                    side_effect=Exception("ECONNRESET")
+                )
+                return bad_client
+            return good_client
+
+        original_connect = mcp_mod.connect_to_server
+        original_invalidate = mcp_mod._invalidate_if_same
+        invalidated_clients = []
+
+        def _track_invalidate(name, client):
+            invalidated_clients.append(client)
+            original_invalidate(name, client)
+
+        mcp_mod.connect_to_server = _fake_connect
+        mcp_mod._invalidate_if_same = _track_invalidate
         try:
-            client = _DummyClient(loop=loop)
-            client._state = "connected"
-
-            mock_result = mock.MagicMock()
-            mock_session = mock.MagicMock()
-            mock_session.call_tool = mock.AsyncMock(return_value=mock_result)
-            client._session = mock_session
-
-            result = client.call_tool("test_tool", {"arg": "val"})
-            assert result == mock_result
+            executor = mcp_mod._make_mcp_executor("test_tool", "retry-test", cfg)
+            result = await executor({}, None)
+            assert result.data["content"] == "ok"
+            assert call_count == 2
+            assert invalidated_clients == [bad_client]
         finally:
-            loop.call_soon_threadsafe(loop.stop)
-            t.join(timeout=5)
+            mcp_mod.connect_to_server = original_connect
+            mcp_mod._invalidate_if_same = original_invalidate
 
-    def test_non_reconnectable_error_propagates(self):
-        loop, t = _make_loop_and_thread()
-        try:
-            client = _DummyClient(loop=loop)
-            client._state = "connected"
-            client._session = mock.MagicMock()
-            client._session.call_tool = mock.AsyncMock(
+    @pytest.mark.asyncio
+    async def test_non_reconnectable_error_no_retry(self):
+        """non-reconnectable error → 直接抛，不重试。"""
+        import src.mcp_tool as mcp_mod
+
+        cfg = _make_config("no-retry-test")
+
+        async def _fake_connect(name, c):
+            client = mock.MagicMock(spec=McpClientBase)
+            client.call_tool = mock.AsyncMock(
                 side_effect=ValueError("bad input")
             )
+            return client
 
+        original_connect = mcp_mod.connect_to_server
+        mcp_mod.connect_to_server = _fake_connect
+        try:
+            executor = mcp_mod._make_mcp_executor("test_tool", "no-retry-test", cfg)
             with pytest.raises(ValueError, match="bad input"):
-                client.call_tool("test", {})
+                await executor({}, None)
         finally:
-            loop.call_soon_threadsafe(loop.stop)
-            t.join(timeout=5)
+            mcp_mod.connect_to_server = original_connect
+
+    @pytest.mark.asyncio
+    async def test_max_retries_exhausted(self):
+        """连续 reconnectable error 超过重试次数 → 抛出。"""
+        import src.mcp_tool as mcp_mod
+
+        cfg = _make_config("exhaust-test")
+
+        async def _fake_connect(name, c):
+            client = mock.MagicMock(spec=McpClientBase)
+            client.call_tool = mock.AsyncMock(
+                side_effect=Exception("ECONNRESET")
+            )
+            return client
+
+        original_connect = mcp_mod.connect_to_server
+        mcp_mod.connect_to_server = _fake_connect
+        try:
+            executor = mcp_mod._make_mcp_executor("test_tool", "exhaust-test", cfg)
+            with pytest.raises(Exception, match="ECONNRESET"):
+                await executor({}, None)
+        finally:
+            mcp_mod.connect_to_server = original_connect
+
+    @pytest.mark.asyncio
+    async def test_invalidate_if_same_skips_new_client(self):
+        """_invalidate_if_same 不会清掉其他协程建的新连接。"""
+        import src.mcp_tool as mcp_mod
+
+        old_client = mock.MagicMock(spec=McpClientBase)
+        new_client = mock.MagicMock(spec=McpClientBase)
+
+        done_task = asyncio.get_event_loop().create_future()
+        done_task.set_result(new_client)
+
+        mcp_mod._connection_cache["safe-test"] = done_task
+        try:
+            mcp_mod._invalidate_if_same("safe-test", old_client)
+            assert "safe-test" in mcp_mod._connection_cache
+        finally:
+            mcp_mod._connection_cache.pop("safe-test", None)
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +441,8 @@ class TestCallToolReconnect:
 # ---------------------------------------------------------------------------
 
 class TestRefreshServerTools:
-    def test_refresh_updates_registry(self):
+    @pytest.mark.asyncio
+    async def test_refresh_updates_registry(self):
         from src.mcp_tool import _refresh_server_tools, _servers, McpServer
         from src.tools import ToolRegistry
 
@@ -422,12 +453,12 @@ class TestRefreshServerTools:
         mcp_mod._tool_registry = registry
 
         mock_client = mock.MagicMock()
-        mock_client.list_tools.return_value = {
+        mock_client.list_tools = mock.AsyncMock(return_value={
             "test-srv": [
                 {"name": "tool_a", "description": "A", "input_schema": {"type": "object"}},
                 {"name": "tool_b", "description": "B", "input_schema": {"type": "object"}},
             ]
-        }
+        })
 
         srv = McpServer(
             config=_make_config("test-srv"),
@@ -442,7 +473,7 @@ class TestRefreshServerTools:
         )
 
         try:
-            _refresh_server_tools("test-srv")
+            await _refresh_server_tools("test-srv")
             assert "mcp__test-srv__tool_a" in registry._tools
             assert "mcp__test-srv__tool_b" in registry._tools
             assert "mcp__test-srv__old_tool" not in registry._tools
@@ -451,11 +482,13 @@ class TestRefreshServerTools:
             _servers.pop("test-srv", None)
             mcp_mod._tool_registry = old_tool_registry
 
-    def test_refresh_nonexistent_server(self):
+    @pytest.mark.asyncio
+    async def test_refresh_nonexistent_server(self):
         from src.mcp_tool import _refresh_server_tools
-        _refresh_server_tools("nonexistent")
+        await _refresh_server_tools("nonexistent")
 
-    def test_refresh_no_registry(self):
+    @pytest.mark.asyncio
+    async def test_refresh_no_registry(self):
         from src.mcp_tool import _refresh_server_tools, _servers, McpServer
         import src.mcp_tool as mcp_mod
 
@@ -463,7 +496,7 @@ class TestRefreshServerTools:
         mcp_mod._tool_registry = None
         _servers["tmp"] = McpServer(config=_make_config("tmp"), client=mock.MagicMock())
         try:
-            _refresh_server_tools("tmp")
+            await _refresh_server_tools("tmp")
         finally:
             _servers.pop("tmp", None)
             mcp_mod._tool_registry = old

@@ -130,10 +130,18 @@ def _invalidate_if_same(name: str, failed_client: McpClientBase) -> None:
 
     避免并发 retry 时 A 清掉 B 刚建好的新连接。
 
+    这里的 task 是 _connection_cache 中的连接建立 task（_create_client），
+    不是 client._lifecycle_task。task.done() 是并发安全守卫，不是连接健康检查。
+
+    此函数只在 call_tool 抛出 reconnectable error 时被调用，调用方已经确认
+    连接不可用——不需要再检查 _lifecycle_task 是否退出。实际上 _lifecycle_task
+    可能仍在运行（卡在 recv 等待），但 tool call 失败是更明显的信号，
+    直接丢弃连接、异步关闭即可。
+
     三种情况：
     - task done + 同一个 client → pop 并异步关闭旧连接
     - task done + 不同 client → 不动（别人已经建了新连接）
-    - task 还在跑 → 不动（有人正在建新连接，或连接还活着）
+    - task 还在跑 → 不动（有人正在建新连接，等它完成）
     """
     task = _connection_cache.get(name)
     if task is not None and task.done():
@@ -160,7 +168,9 @@ def _make_mcp_schema(qualified_name: str, tool: dict[str, Any]) -> dict:
     }
 
 
-MAX_SESSION_RETRIES = 1
+SAME_CONN_RETRIES = 2
+RECONNECT_RETRIES = 1
+BASE_RETRY_DELAY = 0.5
 
 
 def _make_mcp_executor(tool_name: str, server_name: str, cfg: McpServerConfig) -> Callable:
@@ -169,12 +179,22 @@ def _make_mcp_executor(tool_name: str, server_name: str, cfg: McpServerConfig) -
     Each call goes through connect_to_server() which is memoize-cached — zero cost
     when connected, automatic reconnect when disconnected.
 
-    On reconnectable error: invalidate cache → retry once with fresh connection.
-    Matches Claude Code's ensureConnectedClient + MAX_SESSION_RETRIES=1 pattern.
+    Two-phase retry strategy:
+      Phase 1 — same-connection retry with exponential backoff (0.5s, 1s, 2s…).
+        Handles transient errors (network blip, brief timeout) without the cost
+        of tearing down and rebuilding the MCP session.
+      Phase 2 — invalidate cache, reconnect, retry once.
+        If the connection is truly dead, discard it and create a fresh session.
+
+    We only detect connection breakage at call_tool time (Python MCP SDK has no
+    passive onerror/onclose like the TypeScript SDK), so this retry path is the
+    sole recovery mechanism.
     """
     async def _executor(inputs: dict, ctx: Any) -> ToolResult:
         last_client: McpClientBase | None = None
-        for attempt in range(MAX_SESSION_RETRIES + 1):
+        total = SAME_CONN_RETRIES + 1 + RECONNECT_RETRIES
+
+        for attempt in range(total):
             try:
                 last_client = await connect_to_server(server_name, cfg)
                 result = await last_client.call_tool(tool_name, inputs)
@@ -185,13 +205,26 @@ def _make_mcp_executor(tool_name: str, server_name: str, cfg: McpServerConfig) -
                     data={"content": text, "is_error": result.isError}
                 )
             except Exception as e:
-                if _is_reconnectable_error(e) and attempt < MAX_SESSION_RETRIES:
-                    log.warning("[mcp] %s.%s failed (%s), retrying with fresh connection",
-                                server_name, tool_name, e)
+                if not _is_reconnectable_error(e) or attempt >= total - 1:
+                    raise
+                if attempt < SAME_CONN_RETRIES:
+                    delay = BASE_RETRY_DELAY * (2 ** attempt)
+                    log.warning(
+                        "[mcp] %s.%s failed (%s), retry same connection "
+                        "in %.1fs (%d/%d)",
+                        server_name, tool_name, e,
+                        delay, attempt + 1, SAME_CONN_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                elif attempt == SAME_CONN_RETRIES:
+                    log.warning(
+                        "[mcp] %s.%s same-connection retries exhausted, "
+                        "reconnecting",
+                        server_name, tool_name,
+                    )
                     if last_client is not None:
                         _invalidate_if_same(server_name, last_client)
-                    continue
-                raise
+
         raise RuntimeError("unreachable")
     return _executor
 

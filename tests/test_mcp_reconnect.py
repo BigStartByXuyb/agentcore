@@ -326,50 +326,99 @@ class TestConnectToServer:
 
 class TestExecutorRetry:
     @pytest.mark.asyncio
-    async def test_retry_on_reconnectable_error(self):
-        """reconnectable error → invalidate same client → retry → success。"""
+    async def test_same_conn_retry_succeeds(self):
+        """Phase 1: transient error → retry same connection → success, no invalidation."""
         import src.mcp_tool as mcp_mod
 
         cfg = _make_config("retry-test")
-        call_count = 0
-        bad_client = mock.MagicMock(spec=McpClientBase)
 
         mock_result = mock.MagicMock()
         mock_result.content = [mock.MagicMock(text="ok")]
         mock_result.isError = False
 
-        good_client = mock.MagicMock(spec=McpClientBase)
-        good_client.call_tool = mock.AsyncMock(return_value=mock_result)
+        client = mock.MagicMock(spec=McpClientBase)
+        call_count = 0
 
-        async def _fake_connect(name, c):
+        async def _call_tool(name, args):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                bad_client.call_tool = mock.AsyncMock(
-                    side_effect=Exception("ECONNRESET")
-                )
-                return bad_client
-            return good_client
+                raise Exception("ECONNRESET")
+            return mock_result
+
+        client.call_tool = _call_tool
+
+        async def _fake_connect(name, c):
+            return client
 
         original_connect = mcp_mod.connect_to_server
         original_invalidate = mcp_mod._invalidate_if_same
+        original_delay = mcp_mod.BASE_RETRY_DELAY
         invalidated_clients = []
 
-        def _track_invalidate(name, client):
-            invalidated_clients.append(client)
-            original_invalidate(name, client)
+        def _track_invalidate(name, c):
+            invalidated_clients.append(c)
 
         mcp_mod.connect_to_server = _fake_connect
         mcp_mod._invalidate_if_same = _track_invalidate
+        mcp_mod.BASE_RETRY_DELAY = 0.01
         try:
             executor = mcp_mod._make_mcp_executor("test_tool", "retry-test", cfg)
             result = await executor({}, None)
             assert result.data["content"] == "ok"
             assert call_count == 2
+            assert invalidated_clients == []
+        finally:
+            mcp_mod.connect_to_server = original_connect
+            mcp_mod._invalidate_if_same = original_invalidate
+            mcp_mod.BASE_RETRY_DELAY = original_delay
+
+    @pytest.mark.asyncio
+    async def test_reconnect_after_same_conn_retries_exhausted(self):
+        """Phase 1 exhausted → Phase 2: invalidate → reconnect → success."""
+        import src.mcp_tool as mcp_mod
+
+        cfg = _make_config("retry-test")
+
+        mock_result = mock.MagicMock()
+        mock_result.content = [mock.MagicMock(text="ok")]
+        mock_result.isError = False
+
+        bad_client = mock.MagicMock(spec=McpClientBase)
+        bad_client.call_tool = mock.AsyncMock(side_effect=Exception("ECONNRESET"))
+
+        good_client = mock.MagicMock(spec=McpClientBase)
+        good_client.call_tool = mock.AsyncMock(return_value=mock_result)
+
+        connect_count = 0
+
+        async def _fake_connect(name, c):
+            nonlocal connect_count
+            connect_count += 1
+            if connect_count <= mcp_mod.SAME_CONN_RETRIES + 1:
+                return bad_client
+            return good_client
+
+        original_connect = mcp_mod.connect_to_server
+        original_invalidate = mcp_mod._invalidate_if_same
+        original_delay = mcp_mod.BASE_RETRY_DELAY
+        invalidated_clients = []
+
+        def _track_invalidate(name, c):
+            invalidated_clients.append(c)
+
+        mcp_mod.connect_to_server = _fake_connect
+        mcp_mod._invalidate_if_same = _track_invalidate
+        mcp_mod.BASE_RETRY_DELAY = 0.01
+        try:
+            executor = mcp_mod._make_mcp_executor("test_tool", "retry-test", cfg)
+            result = await executor({}, None)
+            assert result.data["content"] == "ok"
             assert invalidated_clients == [bad_client]
         finally:
             mcp_mod.connect_to_server = original_connect
             mcp_mod._invalidate_if_same = original_invalidate
+            mcp_mod.BASE_RETRY_DELAY = original_delay
 
     @pytest.mark.asyncio
     async def test_non_reconnectable_error_no_retry(self):

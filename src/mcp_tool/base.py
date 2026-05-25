@@ -37,7 +37,6 @@ class McpClientBase(ABC):
         self._ready_event: asyncio.Event | None = None
         self._close_event: asyncio.Event | None = None
         self._lifecycle_task: asyncio.Task | None = None
-        self._state: str = "disconnected"
         self._on_tools_changed: Callable[[], Awaitable[None]] | Callable[[], None] | None = None
 
     # ------ 子类必须实现 ------
@@ -57,7 +56,6 @@ class McpClientBase(ABC):
         self._ready_event = asyncio.Event()
         self._lifecycle_task = asyncio.create_task(self._async_lifecycle())
         self._lifecycle_task.add_done_callback(self._on_lifecycle_exit)
-        self._state = "disconnected"
 
     async def wait_ready(self, timeout: float = 30) -> None:
         """等待连接就绪。必须先调 start()。"""
@@ -73,7 +71,6 @@ class McpClientBase(ABC):
             exc = self._lifecycle_task.exception()
             if exc is not None:
                 raise exc
-        self._state = "connected"
 
     async def _teardown(self, timeout: float = 10) -> None:
         """关闭当前 lifecycle 并清理状态。"""
@@ -91,7 +88,6 @@ class McpClientBase(ABC):
         self._lifecycle_task = None
 
     async def close(self) -> None:
-        self._state = "closed"
         await self._teardown()
 
     # ------ 被动检测：lifecycle 退出回调 ------
@@ -100,15 +96,18 @@ class McpClientBase(ABC):
         """lifecycle task 退出时被调用（sync done callback）。
 
         对应 Claude Code 的 client.onclose → 清 memoize 缓存。
+
+        判断预期退出：_close_event 为 None（_teardown 已完成）或已 set
+        （close() 被调用，_teardown 正在等 lifecycle 退出）。
+        非预期退出：_close_event 存在但未 set — lifecycle 自行崩溃。
         """
-        if self._state != "connected":
+        if self._close_event is None or self._close_event.is_set():
             return
         try:
             fut.result()
         except Exception as e:
             log.warning("[mcp] %s lifecycle exited with error: %s", self._cfg.name, e)
-        self._state = "disconnected"
-        log.info("[mcp] %s marked disconnected (lifecycle exited)", self._cfg.name)
+        log.info("[mcp] %s disconnected (lifecycle exited unexpectedly)", self._cfg.name)
 
     # ------ 通知注册 ------
 

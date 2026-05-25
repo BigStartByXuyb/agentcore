@@ -52,6 +52,7 @@ _servers: dict[str, McpServer] = {}
 _config_hashes: dict[str, str] = {}
 _tool_registry: ToolRegistry | None = None
 _connection_cache: dict[str, asyncio.Task[McpClientBase]] = {}
+_server_generations: dict[str, int] = {}  # absent key = generation 0
 _reload_lock: asyncio.Lock | None = None
 
 
@@ -189,12 +190,22 @@ def _make_mcp_executor(tool_name: str, server_name: str, cfg: McpServerConfig) -
     We only detect connection breakage at call_tool time (Python MCP SDK has no
     passive onerror/onclose like the TypeScript SDK), so this retry path is the
     sole recovery mechanism.
+
+    Generation guard: executor captures the server's generation at creation time.
+    If reload_mcp_servers increments it, stale executors abort instead of retrying
+    with an outdated cfg — preventing cache pollution from old-config connections.
     """
+    gen = _server_generations.get(server_name, 0)
+
     async def _executor(inputs: dict, ctx: Any) -> ToolResult:
         last_client: McpClientBase | None = None
         total = SAME_CONN_RETRIES + 1 + RECONNECT_RETRIES
 
         for attempt in range(total):
+            if _server_generations.get(server_name, 0) != gen:
+                raise RuntimeError(
+                    f"MCP server {server_name!r} was reloaded, aborting stale retry"
+                )
             try:
                 last_client = await connect_to_server(server_name, cfg)
                 result = await last_client.call_tool(tool_name, inputs)
@@ -258,6 +269,7 @@ async def _refresh_server_tools(server_name: str) -> None:
     old_count = len(srv.tool_names)
 
     new_names: list[str] = []
+    _server_generations.setdefault(server_name, 0)
     for sname, tools in tool_list.items():
         for tool in tools:
             qname = f"mcp__{sname}__{tool['name']}"
@@ -301,6 +313,7 @@ async def _connect_servers(
             tool_list = await client.list_tools()
             tool_defs: list[ToolDef] = []
             tool_names: list[str] = []
+            _server_generations.setdefault(cfg.name, 0)
             for server_name, tools in tool_list.items():
                 for tool in tools:
                     qname = f"mcp__{server_name}__{tool['name']}"
@@ -389,6 +402,7 @@ async def reload_mcp_servers() -> None:
         )
 
         for name in stale:
+            _server_generations[name] = _server_generations.get(name, 0) + 1
             srv = _servers.pop(name, None)
             if srv is not None:
                 try:
@@ -425,3 +439,4 @@ async def shutdown_mcp() -> None:
             pass
     _servers.clear()
     _connection_cache.clear()
+    _server_generations.clear()

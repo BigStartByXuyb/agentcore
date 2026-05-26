@@ -71,10 +71,14 @@ class AgentDefinition:
 
 from src.agents.explore import explore_agent  # noqa: E402
 from src.agents.plan import plan_agent  # noqa: E402
+from src.agents.general_purpose import general_purpose_agent  # noqa: E402
+from src.agents.verification import verification_agent  # noqa: E402
 
 _BUILTIN_AGENTS: dict[str, AgentDefinition] = {
     explore_agent.name.lower(): explore_agent,
     plan_agent.name.lower(): plan_agent,
+    general_purpose_agent.name.lower(): general_purpose_agent,
+    verification_agent.name.lower(): verification_agent,
 }
 
 
@@ -229,6 +233,19 @@ _MAX_LISTING_DESC_CHARS = 200
 _sent_agent_names: set[str] = set()
 
 
+def _format_tools_suffix(agent: AgentDefinition) -> str:
+    """Build the (Tools: ...) suffix for an agent listing line."""
+    if agent.allowed_tools is not None:
+        tools = [t for t in agent.allowed_tools]
+        if agent.disallowed_tools:
+            tools = [t for t in tools if t not in agent.disallowed_tools]
+        return f"(Tools: {', '.join(tools)})"
+    if agent.disallowed_tools:
+        excluded = ", ".join(agent.disallowed_tools)
+        return f"(Tools: All tools except {excluded})"
+    return "(Tools: *)"
+
+
 def format_agent_listing(agents: dict[str, AgentDefinition]) -> str:
     """Build the text that tells the LLM which agents are available."""
     if not agents:
@@ -242,8 +259,8 @@ def format_agent_listing(agents: dict[str, AgentDefinition]) -> str:
         desc = agent.description
         if len(desc) > _MAX_LISTING_DESC_CHARS:
             desc = desc[: _MAX_LISTING_DESC_CHARS - 1] + "\u2026"
-        lines.append(f"- {agent.name}: {desc}")
-    lines.append("- general-purpose: Default agent with full tool access")
+        tools_suffix = _format_tools_suffix(agent)
+        lines.append(f"- {agent.name}: {desc} {tools_suffix}")
     return "\n".join(lines)
 
 

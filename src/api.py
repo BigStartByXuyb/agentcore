@@ -24,15 +24,14 @@ Public surface (async):
 
 from __future__ import annotations
 
-from typing import AsyncContextManager, Callable
-
-import anthropic
+from typing import TYPE_CHECKING, Any, Callable
 
 from src import config
 from src.providers import get_provider
-from src.providers.anthropic import (
-    get_default_adapter as _get_anthropic_adapter,
-)
+from src.providers.base import ProviderStreamCM
+
+if TYPE_CHECKING:
+    from src.types import Message
 
 # Retry callback signature — (delay_seconds, attempt, max_attempts) -> None
 _RetryCb = Callable[[float, int, int], None]
@@ -53,18 +52,20 @@ from src.providers.anthropic.adapter import (  # noqa: E402
 # Client access (Anthropic-specific, kept for raw SDK callers)
 # ---------------------------------------------------------------------------
 
-def get_client() -> anthropic.AsyncAnthropic:
+def get_client():
     """Return the active AsyncAnthropic client.
 
     Only meaningful when config.PROVIDER == 'anthropic'.  Other providers
     don't expose a raw anthropic.AsyncAnthropic object.  Retained because
     some tests and legacy call sites reach directly into the SDK.
     """
+    from src.providers.anthropic import get_default_adapter as _get_anthropic_adapter
     return _get_anthropic_adapter().get_client()
 
 
 def reset_client() -> None:
     """Force re-creation of the Anthropic client on next call."""
+    from src.providers.anthropic import get_default_adapter as _get_anthropic_adapter
     _get_anthropic_adapter().reset_client()
 
 
@@ -74,7 +75,7 @@ def reset_client() -> None:
 
 async def query_model(
     *,
-    messages: list[dict],
+    messages: list[Message],
     system: str,
     tools: list[dict],
     model: str | None = None,
@@ -82,7 +83,7 @@ async def query_model(
     thinking: dict | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
     on_retry: _RetryCb | None = None,
-) -> anthropic.types.Message:
+) -> Any:
     """Call the active provider's create_message (awaited)."""
     adapter = get_provider(config.PROVIDER)
     return await adapter.create_message(
@@ -99,7 +100,7 @@ async def query_model(
 
 def create_stream_with_retry(
     *,
-    messages: list[dict],
+    messages: list[Message],
     system: str,
     tools: list[dict],
     model: str | None = None,
@@ -107,7 +108,7 @@ def create_stream_with_retry(
     thinking: dict | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
     on_retry: _RetryCb | None = None,
-) -> AsyncContextManager:
+) -> ProviderStreamCM:
     """Call the active provider's stream_message.
 
     Returns an *async* context manager.  Use:
@@ -117,7 +118,6 @@ def create_stream_with_retry(
             final = await stream.get_final_message()
     """
     adapter = get_provider(config.PROVIDER)
-    #print(f"msg:{messages}\n")
     return adapter.stream_message(
         messages=messages,
         system=system,
@@ -134,10 +134,10 @@ async def side_query(
     *,
     model: str,
     system: str,
-    messages: list[dict],
+    messages: list[Message],
     max_tokens: int = 256,
     output_format: dict | None = None,
-) -> anthropic.types.Message:
+) -> Any:
     """Call the active provider's side_query (awaited)."""
     adapter = get_provider(config.PROVIDER)
     return await adapter.side_query(

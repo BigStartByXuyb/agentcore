@@ -320,23 +320,47 @@ def _make_snippet(text: str) -> str:
 
 
 def display_result(data: dict) -> str:
-    if data.get("type") == "error":
-        return ""
-    if data.get("status") == "created":
-        return ""
+    return ""
 
-    header = map_result(data)
-    old_snippet = data.get("old_snippet", "")
-    new_snippet = data.get("new_snippet", "")
-    if not old_snippet and not new_snippet:
-        return header
 
-    parts = [header, ""]
-    for line in old_snippet.splitlines():
-        parts.append(f"  - {line}")
-    for line in new_snippet.splitlines():
-        parts.append(f"  + {line}")
-    return "\n".join(parts)
+def build_preview(tool_input: dict) -> str:
+    """Build a permission preview using the same matching logic as the executor.
+
+    Called by display.py before tool execution. Uses findActualString +
+    preserveQuoteStyle so the preview matches what the executor will do.
+    """
+    file_path = tool_input.get("file_path", "?")
+    old_string = tool_input.get("old_string", "")
+    new_string = tool_input.get("new_string", "")
+
+    header = f"\n  File: {file_path}"
+
+    try:
+        if os.path.isfile(file_path):
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+
+            actual_old = _find_actual_string(content, old_string)
+            if actual_old is not None:
+                adjusted_new = _preserve_quote_style(old_string, actual_old, new_string)
+                line_num = content[:content.index(actual_old)].count("\n") + 1
+                lines: list[str] = [header, f"  @ line {line_num}"]
+                for line in actual_old.splitlines():
+                    lines.append(f"  - {line}")
+                for line in adjusted_new.splitlines():
+                    lines.append(f"  + {line}")
+                if actual_old != old_string:
+                    lines.append("  (quote style auto-normalized)")
+                return "\n".join(lines) + "\n"
+    except Exception:
+        pass
+
+    lines = [header]
+    for line in old_string.splitlines():
+        lines.append(f"  - {line}")
+    for line in new_string.splitlines():
+        lines.append(f"  + {line}")
+    return "\n".join(lines) + "\n"
 
 
 def is_read_only(_inputs: dict) -> bool:
@@ -348,5 +372,6 @@ tool = ToolDef(
     executor=executor,
     map_result=map_result,
     display_result=display_result,
+    build_preview=build_preview,
     is_read_only=is_read_only,
 )

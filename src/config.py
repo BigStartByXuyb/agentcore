@@ -10,7 +10,14 @@ ANTHROPIC_BASE_URL: str | None = os.environ.get("ANTHROPIC_BASE_URL", None)
 # Override via env so users can swap backends without editing config.py.
 PROVIDER: str = os.environ.get("AGENT_PROVIDER", "anthropic")
 
-MODEL: str = "claude-sonnet-4-6"
+# DeepSeek
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL: str | None = os.environ.get("DEEPSEEK_BASE_URL", None)
+DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_REASONER_MODEL: str = os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner")
+
+MODEL: str = os.environ.get("AGENT_MODEL",
+    "claude-sonnet-4-6" if PROVIDER == "anthropic" else DEEPSEEK_MODEL)
 MAX_TOKENS: int = 16384
 MAX_CONTEXT_WINDOW: int = 200_000  # model context window size (for auto compact threshold)
 MAX_TURNS: int = 30

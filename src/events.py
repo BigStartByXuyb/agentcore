@@ -134,14 +134,18 @@ class SubAgentEnd(AgentEvent):
 class PermissionRequest(AgentEvent):
     """Tool needs user authorization — consumer fills the Future.
 
-    When custom_prompt is set (e.g. ExitPlanMode), the display handler shows
-    it instead of the default "Allow tool_name(...)? [y/n/always]" prompt.
-    On rejection, the handler may collect feedback text from the user.
+    ask_mode controls interaction style:
+      - standard: show preview + [y/n/always]
+      - review:   show custom_prompt + [y/n], collect feedback on rejection
+
+    custom_prompt can be set in either mode to override the prompt text.
     """
     tool_name: str = ""
     tool_input: dict = field(default_factory=dict)
     future: asyncio.Future | None = None
+    ask_mode: str = "standard"
     custom_prompt: str | None = None
+    preview: str | None = None
 
 
 @dataclass

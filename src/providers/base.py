@@ -1,36 +1,44 @@
 """Provider adapter protocol — the abstraction above all LLM backends.
 
-Every concrete provider (Anthropic, OpenAI-compat, Google, ...) implements
-this Protocol. The api.py dispatcher + agent_loop only see this shape;
-they don't know which backend is actually responding.
+Every concrete provider (Anthropic, DeepSeek, ...) implements this Protocol.
+The api.py dispatcher + agent_loop only see this shape; they don't know
+which backend is actually responding.
 
 Design contract (async):
-  - create_message()   → awaitable, returns an Anthropic-shaped
-                         Message object (native Anthropic) or a duck-typed
-                         equivalent that exposes .content / .stop_reason /
-                         .usage.input_tokens / .usage.output_tokens.
-  - stream_message()   → returns an *async* context manager. Inside
-                         `async with`, the stream object exposes
-                         .text_stream (async iterator of string deltas)
-                         and .get_final_message() (awaitable).
+  - create_message()   → awaitable, returns ProviderMessage (or duck-typed
+                         equivalent like anthropic.types.Message).
+  - stream_message()   → returns an *async* context manager yielding a
+                         ProviderStream (see stream.py).
   - side_query()       → lightweight awaitable call for memory recall,
                          classification, etc.  No tools, no streaming,
                          no retry events.
 
-The **duck-typing contract** is what makes "everything downstream treats
-responses as Anthropic format" work.  Non-Anthropic adapters fake the
-shape internally — agent_loop never needs provider-specific branches.
+The duck-typing contract means agent_loop never needs provider-specific
+branches. Anthropic's native Message already matches ProviderMessage shape.
 """
 
 from __future__ import annotations
 
-from typing import AsyncContextManager, Protocol, Callable
+from typing import TYPE_CHECKING, Any, Protocol, Callable
 
-import anthropic.types
+from src.providers.stream import ProviderStream
 
+if TYPE_CHECKING:
+    from src.types import Message
 
 # Signature: (delay_seconds, attempt, max_attempts)
 RetryCallback = Callable[[float, int, int], None]
+
+
+class ProviderStreamCM(Protocol):
+    """Async context manager that yields a ProviderStream on enter.
+
+    All adapters' stream_message() return an object satisfying this Protocol.
+    Concrete implementations: _AsyncStreamWithRetry (Anthropic), _DeepSeekStreamWithRetry (DeepSeek).
+    """
+
+    async def __aenter__(self) -> ProviderStream: ...
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None: ...
 
 
 class ProviderAdapter(Protocol):
@@ -39,7 +47,7 @@ class ProviderAdapter(Protocol):
     async def create_message(
         self,
         *,
-        messages: list[dict],
+        messages: list[Message],
         system: str,
         tools: list[dict],
         model: str | None = None,
@@ -47,19 +55,18 @@ class ProviderAdapter(Protocol):
         thinking: dict | None = None,
         max_retries: int = 3,
         on_retry: RetryCallback | None = None,
-    ) -> anthropic.types.Message:
+    ) -> Any:
         """Non-streaming message creation.
 
-        Returns an anthropic.types.Message (native) or a duck-typed
-        equivalent. All callers read .content / .stop_reason / .usage
-        via the Anthropic shape.
+        Receives list[Message] from prepare_messages(). Each adapter
+        converts to its own API format internally.
         """
         ...
 
     def stream_message(
         self,
         *,
-        messages: list[dict],
+        messages: list[Message],
         system: str,
         tools: list[dict],
         model: str | None = None,
@@ -67,17 +74,10 @@ class ProviderAdapter(Protocol):
         thinking: dict | None = None,
         max_retries: int = 3,
         on_retry: RetryCallback | None = None,
-    ) -> AsyncContextManager:
+    ) -> ProviderStreamCM:
         """Streaming message creation.
 
-        Returns an *async* context manager. Inside `async with`, the
-        yielded object exposes:
-          - .text_stream        : async iterator of string deltas
-          - .get_final_message(): awaitable returning the final
-                                   Anthropic-shaped Message
-
-        Note: the adapter may itself internally implement retry before
-        yielding the stream, so the caller just awaits `__aenter__`.
+        Returns an *async* context manager yielding a ProviderStream.
         """
         ...
 
@@ -86,13 +86,12 @@ class ProviderAdapter(Protocol):
         *,
         model: str,
         system: str,
-        messages: list[dict],
+        messages: list[Message],
         max_tokens: int = 256,
         output_format: dict | None = None,
-    ) -> anthropic.types.Message:
+    ) -> Any:
         """Lightweight call for side tasks.
 
-        No tools, no streaming, no retry events. Used by memory recall,
-        classification, summarization, etc.
+        No tools, no streaming, no retry events.
         """
         ...

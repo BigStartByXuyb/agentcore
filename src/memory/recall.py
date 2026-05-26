@@ -15,7 +15,7 @@ import json
 import logging
 
 from src import config
-from src.types import MemoryHeader, MessageHistory
+from src.types import MemoryHeader, MessageHistory, Message
 from src.api import side_query
 from src.memory.scan import scan_memory_files, format_memory_manifest
 
@@ -68,10 +68,10 @@ async def find_relevant_memories(
         response = await side_query(
             model=config.MEMORY_SIDE_QUERY_MODEL,
             system=_SELECT_MEMORIES_SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Query: {query}\n\nAvailable memories:\n{manifest}",
-            }],
+            messages=[Message(
+                role="user",
+                content=f"Query: {query}\n\nAvailable memories:\n{manifest}",
+            )],
             max_tokens=256,
         )
 

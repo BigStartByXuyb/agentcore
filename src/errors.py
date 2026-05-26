@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-from anthropic import APIError, APIConnectionError
-
 
 class AgentErrorCode(Enum):
     """Unified error codes spanning API and tool layers."""
@@ -41,36 +39,63 @@ class AgentErrorCode(Enum):
 # API error classification
 # ---------------------------------------------------------------------------
 
+def _classify_by_status(status: int | None) -> AgentErrorCode | None:
+    """Map HTTP status code to error code (shared by all providers)."""
+    if status is None:
+        return None
+    if status == 429:
+        return AgentErrorCode.API_RATE_LIMIT
+    if status == 529:
+        return AgentErrorCode.API_OVERLOADED
+    if status in (401, 403):
+        return AgentErrorCode.API_AUTH_ERROR
+    if status == 400:
+        return AgentErrorCode.API_BAD_REQUEST
+    if status >= 500:
+        return AgentErrorCode.API_SERVER_ERROR
+    return None
+
+
 def classify_api_error(error: Exception) -> AgentErrorCode:
     """Map an SDK exception to an AgentErrorCode.
 
-    Checks APIConnectionError first (no status_code), then APIError
-    status_code, then falls back to keyword matching on str(error).
+    Supports both Anthropic and OpenAI SDK exceptions.
+    Falls back to keyword matching on str(error).
     """
-    if isinstance(error, APIConnectionError):
-        error_str = str(error).lower()
-        if "timeout" in error_str or "timed out" in error_str:
-            return AgentErrorCode.API_TIMEOUT
-        return AgentErrorCode.API_CONNECTION_ERROR
+    # --- Anthropic SDK ---
+    try:
+        from anthropic import APIError as AnthrAPIError, APIConnectionError as AnthrConnError
+        if isinstance(error, AnthrConnError):
+            error_str = str(error).lower()
+            if "timeout" in error_str or "timed out" in error_str:
+                return AgentErrorCode.API_TIMEOUT
+            return AgentErrorCode.API_CONNECTION_ERROR
+        if isinstance(error, AnthrAPIError):
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+            return _classify_by_status(status) or AgentErrorCode.API_UNKNOWN
+    except ImportError:
+        pass
 
-    if isinstance(error, APIError):
-        status = getattr(error, "status_code", None) or getattr(error, "status", None)
-        if status == 429:
-            return AgentErrorCode.API_RATE_LIMIT
-        if status == 529:
-            return AgentErrorCode.API_OVERLOADED
-        if status in (401, 403):
-            return AgentErrorCode.API_AUTH_ERROR
-        if status == 400:
-            return AgentErrorCode.API_BAD_REQUEST
-        if status is not None and status >= 500:
-            return AgentErrorCode.API_SERVER_ERROR
-        return AgentErrorCode.API_UNKNOWN
+    # --- OpenAI SDK (DeepSeek, GPT, etc.) ---
+    try:
+        from openai import APIError as OaiAPIError, APIConnectionError as OaiConnError
+        if isinstance(error, OaiConnError):
+            error_str = str(error).lower()
+            if "timeout" in error_str or "timed out" in error_str:
+                return AgentErrorCode.API_TIMEOUT
+            return AgentErrorCode.API_CONNECTION_ERROR
+        if isinstance(error, OaiAPIError):
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+            return _classify_by_status(status) or AgentErrorCode.API_UNKNOWN
+    except ImportError:
+        pass
 
-    # Non-SDK exception — check for timeout keywords
+    # --- Generic fallback ---
     error_str = str(error).lower()
     if "timeout" in error_str or "timed out" in error_str:
         return AgentErrorCode.API_TIMEOUT
+    if "context_length_exceeded" in error_str or "prompt is too long" in error_str:
+        return AgentErrorCode.API_BAD_REQUEST
 
     return AgentErrorCode.API_UNKNOWN
 

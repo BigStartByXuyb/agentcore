@@ -31,7 +31,13 @@ def _register_anthropic() -> None:
     _PROVIDERS["anthropic"] = _anthropic_factory
 
 
+def _register_deepseek() -> None:
+    from src.providers.deepseek import get_default_adapter as _deepseek_factory
+    _PROVIDERS["deepseek"] = _deepseek_factory
+
+
 _register_anthropic()
+_register_deepseek()
 
 
 def get_provider(name: str) -> ProviderAdapter:

@@ -29,13 +29,32 @@ from __future__ import annotations
 import asyncio
 import random
 import logging
-from typing import Any, AsyncContextManager
+from typing import Any, AsyncIterator
 
 import anthropic
 from anthropic import APIError, APIConnectionError
 
 from src import config
-from src.providers.base import RetryCallback
+from src.providers.base import RetryCallback, ProviderStreamCM
+from src.providers.types import (
+    ProviderMessage,
+    TextBlock,
+    ToolUseBlock,
+    ThinkingBlock,
+    RedactedThinkingBlock,
+    Usage,
+)
+from src.providers.stream import StreamEvent
+from src.types import (
+    Message,
+    ContentBlock,
+    TextContent,
+    ToolUseContent,
+    ToolResultContent,
+    ThinkingContent,
+    RedactedThinkingContent,
+    _content_block_to_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +123,26 @@ def _extract_retry_after(error: APIError) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Message format conversion: list[Message] → Anthropic API dicts
+# ---------------------------------------------------------------------------
+
+def _messages_to_anthropic(messages: list[Message]) -> list[dict]:
+    """Convert prepared Message objects to Anthropic API format.
+
+    Each Message's content (str or list[ContentBlock]) is converted to
+    the plain dict format the Anthropic SDK expects.
+    """
+    result: list[dict] = []
+    for msg in messages:
+        if isinstance(msg.content, str):
+            api_content: str | list[dict] = msg.content
+        else:
+            api_content = [_content_block_to_dict(b) for b in msg.content]
+        result.append({"role": msg.role, "content": api_content})
+    return result
+
+
+# ---------------------------------------------------------------------------
 # AnthropicAdapter — implements ProviderAdapter Protocol
 # ---------------------------------------------------------------------------
 
@@ -142,7 +181,7 @@ class AnthropicAdapter:
     async def create_message(
         self,
         *,
-        messages: list[dict],
+        messages: list[Message],
         system: str,
         tools: list[dict],
         model: str | None = None,
@@ -151,14 +190,11 @@ class AnthropicAdapter:
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
     ) -> anthropic.types.Message:
-        """Call messages.create() with retry and error handling.
-
-        Mirrors the pattern in claude.ts queryModel() → withRetry().
-        Raises anthropic.APIError (or subclass) on non-retryable failures.
-        """
+        """Call messages.create() with retry and error handling."""
         client = self.get_client()
         resolved_model = model or config.MODEL
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        api_messages = _messages_to_anthropic(messages)
 
         last_error: Exception | None = None
 
@@ -169,7 +205,7 @@ class AnthropicAdapter:
                     max_tokens=resolved_max_tokens,
                     system=system,
                     tools=tools,
-                    messages=messages,
+                    messages=api_messages,
                 )
                 if thinking is not None:
                     params["thinking"] = thinking
@@ -220,7 +256,7 @@ class AnthropicAdapter:
     def stream_message(
         self,
         *,
-        messages: list[dict],
+        messages: list[Message],
         system: str,
         tools: list[dict],
         model: str | None = None,
@@ -228,24 +264,19 @@ class AnthropicAdapter:
         thinking: dict | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
-    ) -> AsyncContextManager:
-        """Create a streaming API call with retry, returning an *async* stream CM.
-
-        Internally retries stream creation on `__aenter__`.  The returned
-        object, once entered via `async with`, exposes:
-          - .text_stream         : async iterator of string deltas
-          - .get_final_message() : awaitable → final anthropic.types.Message
-        """
+    ) -> ProviderStreamCM:
+        """Create a streaming API call with retry, returning an *async* stream CM."""
         client = self.get_client()
         resolved_model = model or config.MODEL
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        api_messages = _messages_to_anthropic(messages)
 
         params: dict[str, Any] = dict(
             model=resolved_model,
             max_tokens=resolved_max_tokens,
             system=system,
             tools=tools,
-            messages=messages,
+            messages=api_messages,
         )
         if thinking is not None:
             params["thinking"] = thinking
@@ -264,16 +295,13 @@ class AnthropicAdapter:
         *,
         model: str,
         system: str,
-        messages: list[dict],
+        messages: list[Message],
         max_tokens: int = 256,
         output_format: dict | None = None,
     ) -> anthropic.types.Message:
-        """Lightweight LLM call for side tasks (memory recall, classification, etc.).
-
-        No tools, no thinking, no streaming, no retry events.
-        Corresponds to Claude Code's sideQuery.ts.
-        """
+        """Lightweight LLM call for side tasks."""
         client = self.get_client()
+        api_messages = _messages_to_anthropic(messages)
         last_error: Exception | None = None
 
         for attempt in range(1, DEFAULT_MAX_RETRIES + 2):
@@ -282,7 +310,7 @@ class AnthropicAdapter:
                     model=model,
                     max_tokens=max_tokens,
                     system=system,
-                    messages=messages,
+                    messages=api_messages,
                 )
                 if output_format is not None:
                     params["response_format"] = output_format
@@ -311,13 +339,64 @@ class AnthropicAdapter:
 
 
 # ---------------------------------------------------------------------------
+# _AnthropicStream — wraps SDK stream, yields StreamEvent + ProviderMessage
+# ---------------------------------------------------------------------------
+
+def _sdk_message_to_provider(msg: Any) -> ProviderMessage:
+    """Convert an anthropic.types.Message to ProviderMessage."""
+    blocks: list = []
+    for block in msg.content:
+        if block.type == "text":
+            blocks.append(TextBlock(text=block.text))
+        elif block.type == "tool_use":
+            blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
+        elif block.type == "thinking":
+            blocks.append(ThinkingBlock(thinking=block.thinking, signature=block.signature))
+        elif block.type == "redacted_thinking":
+            blocks.append(RedactedThinkingBlock(data=block.data))
+    return ProviderMessage(
+        content=blocks,
+        stop_reason=msg.stop_reason or "end_turn",
+        usage=Usage(
+            input_tokens=msg.usage.input_tokens,
+            output_tokens=msg.usage.output_tokens,
+            cache_creation_input_tokens=getattr(msg.usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_input_tokens=getattr(msg.usage, "cache_read_input_tokens", 0) or 0,
+        ),
+    )
+
+
+class _AnthropicStream:
+    """Wraps Anthropic SDK's AsyncMessageStream, converting events to StreamEvent."""
+
+    def __init__(self, raw_stream: Any) -> None:
+        self._raw = raw_stream
+
+    def __aiter__(self) -> AsyncIterator[StreamEvent]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[StreamEvent]:
+        async for event in self._raw:
+            if event.type == "text":
+                yield StreamEvent(type="text", text=event.text)
+            elif event.type == "thinking":
+                yield StreamEvent(type="thinking", thinking=event.thinking)
+            elif event.type == "content_block_delta":
+                yield StreamEvent(type="content_block_delta")
+            elif event.type == "content_block_stop":
+                yield StreamEvent(type="content_block_stop", index=event.index)
+
+    @property
+    def current_message_snapshot(self) -> ProviderMessage:
+        return _sdk_message_to_provider(self._raw.current_message_snapshot)
+
+    async def get_final_message(self) -> ProviderMessage:
+        raw = await self._raw.get_final_message()
+        return _sdk_message_to_provider(raw)
+
+
+# ---------------------------------------------------------------------------
 # _AsyncStreamWithRetry — async context manager wrapping stream creation
-#
-# Why wrap: anthropic.AsyncAnthropic.messages.stream() returns an async CM
-# directly, but we need retry logic around its `__aenter__`.  This class
-# calls stream(...) and enters it inside a retry loop; once successfully
-# entered, it proxies exit and attribute access (.text_stream, etc.) to
-# the inner stream object.
 # ---------------------------------------------------------------------------
 
 class _AsyncStreamWithRetry:
@@ -343,8 +422,9 @@ class _AsyncStreamWithRetry:
         for attempt in range(1, self._max_retries + 2):
             try:
                 cm = self._client.messages.stream(**self._params)
-                self._stream = await cm.__aenter__()
+                raw_stream = await cm.__aenter__()
                 self._inner_cm = cm
+                self._stream = _AnthropicStream(raw_stream)
                 return self._stream
 
             except APIConnectionError as e:

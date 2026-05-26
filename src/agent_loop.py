@@ -32,7 +32,7 @@ from src.types import (
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
 from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
-from src.tool_runner import merge_tool_call, execute_tool_groups, StreamingToolExecutor
+from src.tool_runner import merge_tool_call, execute_tool_groups, StreamingToolExecutor, DenialAbortError, DenialTracker
 from src.tools import registry as tool_registry
 from src.api import query_model, create_stream_with_retry
 from src.errors import create_assistant_error_message
@@ -347,7 +347,7 @@ async def run_agent_loop(
                     tool_executor=streaming_executor, on_event=on_event,
                 )
             return await query_model(
-                messages=history.normalized_for_api(),
+                messages=history.prepare_messages(),
                 system=system_prompt, tools=tools,
                 thinking=thinking, on_retry=_on_retry,
             )
@@ -394,6 +394,8 @@ async def run_agent_loop(
 
             if final_error is not None:
                 _emit_error(final_error)
+                if _is_fatal_error(final_error):
+                    break
                 continue
 
         for ev in pending_retry_events:
@@ -419,20 +421,30 @@ async def run_agent_loop(
         history.add_assistant(assistant_content)
 
         # --- Execute tools: stream vs non-stream ---
-        if stream and streaming_executor is not None and streaming_executor.has_tools():
-            tool_use_context = _apply_tool_results(
-                streaming_executor.collect_results(),
-                assistant_content, history, tool_use_context,
-            )
-            tool_names_used = [t.name for t in streaming_executor._tools]
-        else:
-            result = await _process_nonstream_tools(
-                response, assistant_content, history, tool_use_context,
-                label, _state, on_event,
-            )
-            if result is None:
-                return extract_text(response.content)
-            tool_use_context, tool_names_used = result
+        try:
+            if stream and streaming_executor is not None and streaming_executor.has_tools():
+                tool_use_context = _apply_tool_results(
+                    streaming_executor.collect_results(),
+                    assistant_content, history, tool_use_context,
+                )
+                tool_names_used = [t.name for t in streaming_executor._tools]
+            else:
+                result = await _process_nonstream_tools(
+                    response, assistant_content, history, tool_use_context,
+                    label, _state, on_event,
+                )
+                if result is None:
+                    return extract_text(response.content)
+                tool_use_context, tool_names_used = result
+        except DenialAbortError as e:
+            # Inject synthetic error tool_results for all tool_use blocks
+            # so the message history stays valid (every tool_use needs a tool_result).
+            error_blocks: list[ToolResultContent] = []
+            _recover_orphan_tool_results(assistant_content, error_blocks)
+            if error_blocks:
+                history.add_tool_results(error_blocks)
+            _emit_error(e)
+            break
 
         # --- Shared post-tool logic (both paths) ---
         _state.messages_since_last_usage = len(history) - _msg_count_at_usage
@@ -516,6 +528,7 @@ async def agent_loop(
         permissions=_get_permission_engine(),
         file_state_cache=file_state_cache,
         task_store=state._task_store,
+        denial_tracker=DenialTracker(),
     )
     tool_use_context.agent_state = state
 
@@ -572,7 +585,7 @@ async def _stream_call(
     Returns the final API Message.
     """
     stream_cm = create_stream_with_retry(
-        messages=history.normalized_for_api(),
+        messages=history.prepare_messages(),
         system=system_prompt,
         tools=tools,
         thinking=thinking,
@@ -708,26 +721,70 @@ def _build_thinking_param() -> dict | None:
     return {"type": "enabled", "budget_tokens": budget}
 
 
+def _is_fatal_error(error: Exception) -> bool:
+    """Check if an API error is non-recoverable (auth, permission, bad key).
+
+    These errors will persist no matter how many times we retry,
+    so the agent loop should break instead of continue.
+    """
+    from src.errors import classify_api_error, AgentErrorCode
+    code = classify_api_error(error)
+    return code in (AgentErrorCode.API_AUTH_ERROR,)
+
+
 def _is_prompt_too_long(error: Exception) -> bool:
     """Check if API error is a prompt-too-long error (400/413)."""
-    from anthropic import APIError as _APIError
-    if not isinstance(error, _APIError):
-        return False
-    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    status: int | None = None
+
+    try:
+        from anthropic import APIError as _AnthrAPIError
+        if isinstance(error, _AnthrAPIError):
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    except ImportError:
+        pass
+
+    if status is None:
+        try:
+            from openai import APIError as _OaiAPIError
+            if isinstance(error, _OaiAPIError):
+                status = getattr(error, "status_code", None) or getattr(error, "status", None)
+        except ImportError:
+            pass
+
+    if status is None:
+        msg = str(error).lower()
+        return "prompt is too long" in msg or "context_length_exceeded" in msg
+
     if status == 413:
         return True
     if status == 400:
         msg = str(error).lower()
-        return "prompt is too long" in msg or "too many tokens" in msg
+        return ("prompt is too long" in msg or "too many tokens" in msg
+                or "context_length_exceeded" in msg)
     return False
 
 
 def _is_thinking_400(error: Exception) -> bool:
     """Check if an API error is a thinking-related 400 that can be recovered."""
-    from anthropic import APIError as _APIError
-    if not isinstance(error, _APIError):
+    status: int | None = None
+
+    try:
+        from anthropic import APIError as _AnthrAPIError
+        if isinstance(error, _AnthrAPIError):
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    except ImportError:
+        pass
+
+    if status is None:
+        try:
+            from openai import APIError as _OaiAPIError
+            if isinstance(error, _OaiAPIError):
+                status = getattr(error, "status_code", None) or getattr(error, "status", None)
+        except ImportError:
+            pass
+
+    if status is None:
         return False
-    status = getattr(error, "status_code", None) or getattr(error, "status", None)
     if status != 400:
         return False
     msg = str(error).lower()

@@ -146,14 +146,14 @@ class PermissionEngine:
         *,
         user_config: str | None = None,
         project_config: str | None = None,
-        silent: bool = False,
+        headless: bool = False,
     ) -> None:
         self._user_config = user_config
         self._project_config = project_config
         self._user_rules: list[PermissionRule] = []
         self._project_rules: list[PermissionRule] = []
         self._session_rules: list[PermissionRule] = []
-        self._silent = silent
+        self._headless = headless
 
         if user_config:
             self._user_rules = self._load_config(user_config, "user")
@@ -237,14 +237,16 @@ class PermissionEngine:
             if self._matches(rule, tool_name, content):
                 return ToolPermissionResult(behavior="allow")
 
-        return ToolPermissionResult(
-            behavior="deny" if self._silent else "ask",
-            deny_message="Sub-agent cannot prompt for permission" if self._silent else "",
-        )
+        return ToolPermissionResult(behavior="ask")
 
-    def as_silent(self) -> "PermissionEngine":
-        """Create a silent copy for sub-agents — ask becomes deny."""
-        clone = PermissionEngine(silent=True)
+    def as_headless(self) -> "PermissionEngine":
+        """Create a headless copy for background agents that cannot prompt the user.
+
+        check_tool_permissions() converts unresolved 'ask' to 'deny' when
+        _headless is True. Foreground sub-agents should share the parent's
+        engine directly (not use this method).
+        """
+        clone = PermissionEngine(headless=True)
         clone._user_rules = self._user_rules
         clone._project_rules = self._project_rules
         clone._session_rules = self._session_rules

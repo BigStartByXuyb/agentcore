@@ -80,9 +80,9 @@ def _is_prompt_too_long(error: Exception) -> bool:
     return "prompt is too long" in msg or "prompt_too_long" in msg
 
 
-def _messages_to_api_format(messages: list[Message]) -> list[dict]:
-    """Convert Message objects to raw API dicts, reusing MessageHistory's logic."""
-    return MessageHistory(messages=messages).normalized_for_api()
+def _messages_to_prepared(messages: list[Message]) -> list[Message]:
+    """Expand attachments + merge same-role, reusing MessageHistory's logic."""
+    return MessageHistory(messages=messages).prepare_messages()
 
 
 async def auto_compact(history: MessageHistory) -> bool:
@@ -93,8 +93,8 @@ async def auto_compact(history: MessageHistory) -> bool:
 
     Returns True if compaction was performed, False otherwise.
     """
-    messages_for_api = history.normalized_for_api()
-    if not messages_for_api:
+    prepared = history.prepare_messages()
+    if not prepared:
         return False
 
     source_messages = list(history.messages)
@@ -104,7 +104,7 @@ async def auto_compact(history: MessageHistory) -> bool:
             response = await side_query(
                 model=config.MEMORY_SIDE_QUERY_MODEL,
                 system=get_compact_prompt(),
-                messages=messages_for_api,
+                messages=prepared,
                 max_tokens=config.AUTO_COMPACT_MAX_TOKENS,
             )
         except Exception as e:
@@ -114,7 +114,7 @@ async def auto_compact(history: MessageHistory) -> bool:
                     logger.warning("Auto compact: cannot truncate further, giving up")
                     return False
                 source_messages = truncated
-                messages_for_api = _messages_to_api_format(source_messages)
+                prepared = _messages_to_prepared(source_messages)
                 logger.info(
                     "Auto compact: prompt too long, truncated to %d messages (attempt %d/%d)",
                     len(source_messages), attempt + 1, MAX_PTL_RETRIES,
@@ -139,7 +139,7 @@ async def auto_compact(history: MessageHistory) -> bool:
         summary_text = get_compact_user_summary(raw_text, suppress_follow_up=True)
         history.replace_with_summary(summary_text)
 
-        logger.info("Auto compact: replaced %d messages with summary", len(messages_for_api))
+        logger.info("Auto compact: replaced %d messages with summary", len(prepared))
         return True
 
     return False

@@ -89,7 +89,7 @@ AttachmentType = Literal["relevant_memories", "system_reminder", "memory_index",
 class Attachment:
     """Data attached to a Message, expanded into content before API calls.
 
-    Attachments are NOT sent to the API directly — normalized_for_api()
+    Attachments are NOT sent to the API directly — prepare_messages()
     expands them into the message's content field.
     """
 
@@ -214,9 +214,8 @@ class MessageHistory:
     """Manages the persistent conversation message list.
 
     Internally stores a list[Message] with rich metadata and attachments.
-    normalized_for_api() converts to the raw list[dict] format that the
-    Anthropic API expects, expanding attachments into message content and
-    merging consecutive same-role messages.
+    prepare_messages() expands attachments and merges consecutive same-role
+    messages, returning list[Message] for provider adapters to convert.
 
     Corresponds to Claude Code's internal Message[] + normalizeMessagesForAPI().
     """
@@ -270,44 +269,43 @@ class MessageHistory:
     def inject_messages(self, new_messages: list[Message]) -> None:
         self._messages.extend(new_messages)
 
-    def normalized_for_api(self) -> list[dict]:
-        """Return a message list safe for the Anthropic API.
+    def prepare_messages(self) -> list[Message]:
+        """Expand attachments + merge consecutive same-role messages.
 
-        Three-step process:
-          1. Convert ContentBlock objects to plain dicts.
-          2. Expand attachments into the content field.
-          3. Merge consecutive same-role messages (API requires alternation).
-
+        Returns a NEW list[Message] ready for per-adapter format conversion.
+        No ContentBlock → dict conversion is done here — that's the adapter's job.
         The internal _messages list is NOT mutated.
         """
         if not self._messages:
             return []
 
-        # Step 1+2: convert blocks to dicts + expand attachments
-        raw: list[dict] = []
+        expanded: list[Message] = []
         for msg in self._messages:
-            if isinstance(msg.content, str):
-                api_content: str | list[dict] = msg.content
-            else:
-                api_content = [_content_block_to_dict(b) for b in msg.content]
-
-            # all attchments type are "text"
+            content = msg.content
             if msg.attachments:
-                api_content = _expand_with_attachments(api_content, msg.attachments)
+                content = _expand_attachments_to_content(content, msg.attachments)
+            expanded.append(Message(
+                role=msg.role,
+                content=content,
+                msg_type=msg.msg_type,
+                timestamp=msg.timestamp,
+            ))
 
-            raw.append({"role": msg.role, "content": api_content})
-
-        # Step 2: merge consecutive same-role
-        result: list[dict] = [raw[0]]
-        for d in raw[1:]:
+        result: list[Message] = [expanded[0]]
+        for m in expanded[1:]:
             prev = result[-1]
-            if d["role"] == prev["role"]:
-                prev_content = _normalize_content(prev["content"])
-                cur_content = _normalize_content(d["content"])
-                merged = _join_at_seam(prev_content, cur_content)
-                result[-1] = {**prev, "content": merged}
+            if m.role == prev.role:
+                prev_blocks = _normalize_content_blocks(prev.content)
+                cur_blocks = _normalize_content_blocks(m.content)
+                merged = _join_content_blocks(prev_blocks, cur_blocks)
+                result[-1] = Message(
+                    role=prev.role,
+                    content=merged,
+                    msg_type=prev.msg_type,
+                    timestamp=prev.timestamp,
+                )
             else:
-                result.append(d)
+                result.append(m)
         return result
 
     # -- persistence --------------------------------------------------------
@@ -357,6 +355,8 @@ class ToolUseContext:
     invoked_skills: dict[str, "InvokedSkillInfo"] = field(default_factory=dict)  # inline skills active this session
     # --- task store (LLM self-managed todo list) ---
     task_store: Any | None = None  # TaskStore instance (avoid circular import)
+    # --- denial tracking (prevents infinite permission-deny loops) ---
+    denial_tracker: Any | None = None  # DenialTracker instance (avoid circular import)
     # --- agent state back-reference ---
     agent_state: "AgentState | None" = None # back-reference so tools (e.g. ExitPlanMode) can read/mutate state
 
@@ -395,8 +395,14 @@ class ToolPermissionResult:
       - ask:         needs user confirmation (with optional custom_prompt)
       - deny:        reject this invocation
       - passthrough: defer to PermissionEngine rules (default for most tools)
+
+    ask_mode controls the interactive behavior when behavior='ask':
+      - standard:  show preview + [y/n/always], "always" adds session rule
+      - review:    show custom_prompt + [y/n], collect feedback on rejection,
+                   no "always" option (for one-off approvals like plan review)
     """
     behavior: Literal["allow", "deny", "ask", "passthrough"]
+    ask_mode: Literal["standard", "review"] = "standard"
     custom_prompt: str | None = None
     deny_message: str = ""
     engine_content: str | None = None
@@ -490,6 +496,7 @@ class ToolDef:
         executor: Callable[[dict, ToolUseContext], ToolExecutorReturn],
         map_result: Callable[[Any], str],
         display_result: Callable[[Any], str] | None = None,
+        build_preview: Callable[[dict], str] | None = None,
         is_enabled: Callable[[], bool] | None = None,
         is_read_only: Callable[[dict], bool] | None = None,
         is_destructive: Callable[[dict], bool] | None = None,
@@ -500,6 +507,7 @@ class ToolDef:
         self.executor = executor
         self.map_result = map_result
         self.display_result = display_result
+        self.build_preview = build_preview
         self.is_enabled = is_enabled or (lambda: True)
         self.is_read_only = is_read_only or (lambda _: False)
         self.is_destructive = is_destructive or (lambda _: False)
@@ -517,38 +525,30 @@ class ToolDef:
 
 # ---------------------------------------------------------------------------
 # Module-level helpers for MessageHistory.normalized_for_api()
-# Mirrors Claude Code's joinTextAtSeam() + normalizeUserTextContent()
+# ---------------------------------------------------------------------------
+# ContentBlock-level helpers for MessageHistory.prepare_messages()
 # ---------------------------------------------------------------------------
 
-def _expand_with_attachments(
-    content: str | list[dict],
-    attachments: list[Attachment],
-) -> list[dict]:
-    """Expand attachments into content blocks for the API.
+def _normalize_content_blocks(content: str | list[ContentBlock]) -> list[ContentBlock]:
+    """Ensure content is always a list of ContentBlock objects."""
+    if isinstance(content, str):
+        return [TextContent(text=content)]
+    return list(content)
 
-    Appends each attachment's text as a text block to the content.
-    """
-    blocks = _normalize_content(content)
+
+def _expand_attachments_to_content(
+    content: str | list[ContentBlock],
+    attachments: list[Attachment],
+) -> list[ContentBlock]:
+    """Expand attachments into ContentBlock list (no dict conversion)."""
+    blocks = _normalize_content_blocks(content)
     for att in attachments:
-        blocks.append({"type":"text", "text":att.content})
+        blocks.append(TextContent(text=att.content))
     return blocks
 
 
-def _normalize_content(content: str | list[dict]) -> list[dict]:
-    """Ensure content is always a list of content blocks."""
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    return content
-
-
-def _join_at_seam(a: list[dict], b: list[dict]) -> list[dict]:
-    """Concatenate two content-block arrays, adding '\\n' at text-text seams.
-
-    Mirrors joinTextAtSeam() in messages.ts:
-      - If a's last block and b's first block are both text, append '\\n'
-        to a's last text so the two don't smash together.
-      - Blocks remain separate objects — LLM still sees distinct boundaries.
-    """
+def _join_content_blocks(a: list[ContentBlock], b: list[ContentBlock]) -> list[ContentBlock]:
+    """Concatenate two ContentBlock arrays, adding '\\n' at text-text seams."""
     if not a:
         return b
     if not b:
@@ -556,8 +556,8 @@ def _join_at_seam(a: list[dict], b: list[dict]) -> list[dict]:
 
     last_a = a[-1]
     first_b = b[0]
-    if last_a.get("type") == "text" and first_b.get("type") == "text":
-        patched_last = {**last_a, "text": last_a["text"] + "\n"}
+    if isinstance(last_a, TextContent) and isinstance(first_b, TextContent):
+        patched_last = TextContent(text=last_a.text + "\n")
         return [*a[:-1], patched_last, *b]
     return [*a, *b]
 

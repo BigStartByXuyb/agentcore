@@ -75,19 +75,30 @@ async def run_tool_use(
         if perm.behavior == "deny":
             on_event(PermissionDenied(label=label, tool_name=tool_name, message=perm.deny_message))
             on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=perm.deny_message))
+            if context.denial_tracker is not None:
+                context.denial_tracker.record_denial()
+                context.denial_tracker.check_abort()
             return (ToolResult(data=None), id, perm.deny_message, True)
 
         if perm.behavior == "ask":
+            preview: str | None = None
+            if tool.build_preview is not None:
+                try:
+                    preview = tool.build_preview(tool_input)
+                except Exception:
+                    pass
+
             future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
             on_event(PermissionRequest(
                 label=label, tool_name=tool_name, tool_input=tool_input,
-                future=future, custom_prompt=perm.custom_prompt,
+                future=future, ask_mode=perm.ask_mode,
+                custom_prompt=perm.custom_prompt, preview=preview,
             ))
             answer = await future
 
             if answer in ("y", "yes"):
                 pass
-            elif answer == "always" and perm.custom_prompt is None and context.permissions is not None:
+            elif answer == "always" and perm.ask_mode == "standard" and context.permissions is not None:
                 from src.permissions import PermissionRule
                 context.permissions.add_session_rule(PermissionRule(
                     tool_name=tool_name,
@@ -96,7 +107,7 @@ async def run_tool_use(
                     source="session",
                 ))
             else:
-                if perm.custom_prompt:
+                if perm.ask_mode == "review":
                     feedback = answer[2:] if answer.startswith("n:") else ""
                     deny_msg = "User rejected the plan."
                     if feedback:
@@ -113,6 +124,9 @@ async def run_tool_use(
             result = await ret
         else:
             result = ret
+
+        if context.denial_tracker is not None:
+            context.denial_tracker.record_success()
 
     except Exception as e:
         error_text = f"Tool '{tool_name}' executor failed: {type(e).__name__}: {e}"
@@ -155,11 +169,20 @@ async def execute_tool_groups(
     for group in groups:
         if group.type == "read-only" and len(group.tool_call) > 1:
             # Concurrent execution — pass on_event directly, output may interleave.
-            tasks = [
-                run_tool_use(label, c.id, c.name, c.input, context, on_event)
+            created_tasks = [
+                asyncio.create_task(
+                    run_tool_use(label, c.id, c.name, c.input, context, on_event)
+                )
                 for c in group.tool_call
             ]
-            results = await asyncio.gather(*tasks)
+            try:
+                results = await asyncio.gather(*created_tasks)
+            except BaseException:
+                for t in created_tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*created_tasks, return_exceptions=True)
+                raise
             all_results.extend(results)
 
             # --- Ordered output version (Queue buffering) ---
@@ -298,10 +321,19 @@ class StreamingToolExecutor:
         #         break
 
     async def drain_remaining(self) -> None:
-        """Wait for all executing tools to complete."""
-        for tracked in self._tools:
-            if tracked.task is not None and tracked.status == "executing":
-                await tracked.task
+        """Wait for all executing tools to complete. Cancel remaining on error."""
+        pending = [t.task for t in self._tools
+                   if t.task is not None and t.status == "executing"]
+        if not pending:
+            return
+        try:
+            await asyncio.gather(*pending)
+        except BaseException:
+            for t in pending:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise
 
         # --- Ordered output version (Queue buffering) ---
         # for tracked in self._tools:
@@ -316,6 +348,53 @@ class StreamingToolExecutor:
 
     def collect_results(self) -> list[ToolUseReturn]:
         return [t.result for t in self._tools if t.result is not None]
+
+
+# ---------------------------------------------------------------------------
+# Denial tracking — prevents infinite retry loops on permission denial
+# ---------------------------------------------------------------------------
+
+MAX_CONSECUTIVE_DENIALS = 3
+MAX_TOTAL_DENIALS = 20
+
+
+class DenialAbortError(Exception):
+    """Raised when denial limits are exceeded — terminates the agent loop."""
+    pass
+
+
+class DenialTracker:
+    """Tracks consecutive and total tool permission denials.
+
+    Mirrors Claude Code's denialTracking.ts:
+      - consecutiveDenials: global counter (not per-tool), reset on any success
+      - totalDenials: session counter, reset when total limit hit
+      - Exceeding either limit raises DenialAbortError
+    """
+
+    def __init__(self) -> None:
+        self.consecutive: int = 0
+        self.total: int = 0
+
+    def record_denial(self) -> None:
+        self.consecutive += 1
+        self.total += 1
+
+    def record_success(self) -> None:
+        self.consecutive = 0
+
+    def check_abort(self) -> None:
+        """Raise DenialAbortError if limits exceeded."""
+        if self.consecutive >= MAX_CONSECUTIVE_DENIALS:
+            raise DenialAbortError(
+                f"Too many consecutive permission denials ({self.consecutive}). Aborting agent."
+            )
+        if self.total >= MAX_TOTAL_DENIALS:
+            self.total = 0
+            self.consecutive = 0
+            raise DenialAbortError(
+                f"Too many total permission denials ({MAX_TOTAL_DENIALS}). Aborting agent."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +419,19 @@ def check_tool_permissions(
         content = _extract_content(tool_name, tool_input)
         result = context.permissions.check(tool_name, content)
         result.engine_content = content
-        if not result.deny_message and result.behavior == "deny":
-            result.deny_message = f"Permission denied for {tool_name}."
+
+        if result.behavior == "deny":
+            if not result.deny_message:
+                result.deny_message = f"Permission denied for {tool_name}."
+            return result
+
+        # No rule matched → ask. Sub-agent cannot prompt, convert to deny.
+        if result.behavior == "ask" and context.permissions._headless:
+            return ToolPermissionResult(
+                behavior="deny",
+                deny_message=f"Permission denied for {tool_name} (sub-agent cannot prompt).",
+            )
+
         return result
 
     return ToolPermissionResult(behavior="ask")

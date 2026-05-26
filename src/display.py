@@ -8,7 +8,10 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from src.types import EventCallback
 from src.events import (
@@ -172,6 +175,18 @@ def _ask_single_question(q: dict) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Permission preview — show what the tool WILL do before user confirms
+# ---------------------------------------------------------------------------
+
+def _fallback_preview(tool_name: str, tool_input: dict) -> str:
+    """Generic preview for tools that don't provide build_preview."""
+    if tool_name == "bash":
+        cmd = tool_input.get("command", "")
+        return f"\n  Command:\n    {cmd}\n"
+    return f" {_summarize_input(tool_input)}"
+
+
+# ---------------------------------------------------------------------------
 # Interactive handler factory
 # ---------------------------------------------------------------------------
 
@@ -185,52 +200,81 @@ def make_interactive_handler(
     For PermissionRequest events (interactive=True): schedule a user prompt
     via asyncio.to_thread and resolve the Future so the tool runner resumes.
     For all other events: delegate to *base_handler*.
+
+    Uses an asyncio.Lock to serialize all user-input prompts — prevents
+    interleaved prompts when concurrent tools both need permission.
     """
+    input_lock = asyncio.Lock()
+
+    def _safe_set(future: asyncio.Future, value: object) -> None:
+        if not future.done():
+            future.set_result(value)
 
     def handler(event: AgentEvent) -> None:
         if isinstance(event, PermissionRequest) and event.future is not None:
+            fut = event.future
             if interactive:
-                if event.custom_prompt:
-                    async def _resolve_custom() -> None:
-                        answer = await asyncio.to_thread(input, event.custom_prompt)
-                        answer = answer.strip().lower()
-                        if answer in ("y", "yes"):
-                            event.future.set_result("y")
-                        else:
-                            feedback = await asyncio.to_thread(
-                                input, "  Feedback (press Enter to skip): "
-                            )
-                            feedback = feedback.strip()
-                            if feedback:
-                                event.future.set_result(f"n:{feedback}")
-                            else:
-                                event.future.set_result("n")
-                    asyncio.create_task(_resolve_custom())
+                if event.ask_mode == "review":
+                    prompt_text = event.custom_prompt or f"\n  Approve {event.tool_name}? [y/n]: "
+
+                    async def _resolve_review() -> None:
+                        try:
+                            async with input_lock:
+                                answer = await asyncio.to_thread(input, prompt_text)
+                                answer = answer.strip().lower()
+                                if answer in ("y", "yes"):
+                                    _safe_set(fut, "y")
+                                else:
+                                    feedback = await asyncio.to_thread(
+                                        input, "  Feedback (press Enter to skip): "
+                                    )
+                                    feedback = feedback.strip()
+                                    if feedback:
+                                        _safe_set(fut, f"n:{feedback}")
+                                    else:
+                                        _safe_set(fut, "n")
+                        except Exception as e:
+                            logger.error("Permission prompt failed: %s", e)
+                            _safe_set(fut, "n")
+                    asyncio.create_task(_resolve_review())
                 else:
-                    summary = _summarize_input(event.tool_input)
-                    prompt = f"\n  Allow {event.tool_name}({summary})? [y/n/always]: "
+                    preview = event.preview or _fallback_preview(event.tool_name, event.tool_input)
+                    if event.custom_prompt:
+                        prompt = f"{preview}  {event.custom_prompt} [y/n/always]: "
+                    else:
+                        prompt = f"\n  Allow {event.tool_name}?{preview}  [y/n/always]: "
 
                     async def _resolve() -> None:
-                        answer = await asyncio.to_thread(input, prompt)
-                        event.future.set_result(answer.strip().lower())
+                        try:
+                            async with input_lock:
+                                answer = await asyncio.to_thread(input, prompt)
+                                _safe_set(fut, answer.strip().lower())
+                        except Exception as e:
+                            logger.error("Permission prompt failed: %s", e)
+                            _safe_set(fut, "n")
 
                     asyncio.create_task(_resolve())
             else:
-                event.future.set_result("n")
+                fut.set_result("n")
 
         elif isinstance(event, UserQuestionRequest) and event.future is not None:
+            fut = event.future
             if interactive:
                 async def _resolve_questions() -> None:
-                    answers: dict[str, str] = {}
-                    for q in event.questions:
-                        answers.update(
-                            await asyncio.to_thread(_ask_single_question, q)
-                        )
-                    assert event.future is not None
-                    event.future.set_result(answers)
+                    try:
+                        async with input_lock:
+                            answers: dict[str, str] = {}
+                            for q in event.questions:
+                                answers.update(
+                                    await asyncio.to_thread(_ask_single_question, q)
+                                )
+                            _safe_set(fut, answers)
+                    except Exception as e:
+                        logger.error("User question prompt failed: %s", e)
+                        _safe_set(fut, {})
                 asyncio.create_task(_resolve_questions())
             else:
-                event.future.set_result({})
+                fut.set_result({})
         else:
             base_handler(event)
 

@@ -174,7 +174,13 @@ def build_plan_exit_attachment(plan_file_path: str) -> Attachment:
 
 
 def make_plan_mode_overrides(plan_file_path: str, registry) -> dict[str, ToolDef]:
-    """Create tool_overrides that restrict write_file/edit_file to the plan file only."""
+    """Create tool_overrides that restrict write_file/edit_file to the plan file only.
+
+    NOT currently wired into the main agent loop. Plan mode allows free file
+    writes because enforcing plan-file-only restriction would prevent the LLM
+    from doing exploratory reads/writes during planning. Kept as opt-in utility
+    for stricter plan mode configurations in the future.
+    """
     abs_plan = os.path.normpath(os.path.abspath(plan_file_path))
     overrides: dict[str, ToolDef] = {}
 

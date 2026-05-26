@@ -45,6 +45,7 @@ def check_permissions(inputs: dict, context: ToolUseContext) -> ToolPermissionRe
         )
     return ToolPermissionResult(
         behavior="ask",
+        ask_mode="review",
         custom_prompt="\n  Plan is ready for review. Approve this plan? [y/n]: ",
     )
 

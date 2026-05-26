@@ -157,18 +157,24 @@ def map_result(data: dict) -> str:
 
 
 def display_result(data: dict) -> str:
-    if data.get("type") == "error":
-        return ""
+    return ""
 
-    header = map_result(data)
-    preview = data.get("content_preview", "")
-    if not preview:
-        return header
 
-    parts = [header, ""]
-    for line in preview.splitlines():
-        parts.append(f"  {line}")
-    return "\n".join(parts)
+def build_preview(tool_input: dict) -> str:
+    """Build a permission preview for write_file."""
+    file_path = tool_input.get("file_path", "?")
+    content = tool_input.get("content", "")
+    exists = os.path.isfile(file_path)
+
+    action = "Overwrite" if exists else "Create"
+    header = f"\n  {action}: {file_path}"
+
+    preview_lines = content.splitlines()[:20]
+    preview = "\n".join(f"  + {line}" for line in preview_lines)
+    if len(content.splitlines()) > 20:
+        preview += f"\n  ... ({len(content.splitlines()) - 20} more lines)"
+
+    return header + "\n" + preview + "\n"
 
 
 def is_read_only(inputs: dict) -> bool:
@@ -180,5 +186,6 @@ tool = ToolDef(
     executor=executor,
     map_result=map_result,
     display_result=display_result,
+    build_preview=build_preview,
     is_read_only=is_read_only,
 )

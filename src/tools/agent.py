@@ -186,16 +186,18 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     # --- Sub-agent context ---
     from src.utils.file_state_cache import FileStateCache
+    from src.tool_runner import DenialTracker
     label = f"agent:{agent_def.name}"
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
-        permissions=context.permissions.as_silent() if context.permissions else None,
+        permissions=context.permissions,
         on_event=context.on_event,
         file_state_cache=FileStateCache(),
         agent_state=AgentState(agent_id=label),
+        denial_tracker=DenialTracker(),
     )
 
     try:

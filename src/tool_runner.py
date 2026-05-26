@@ -17,9 +17,9 @@ import inspect
 import logging
 from dataclasses import dataclass, replace
 
-from src.types import EventCallback, ToolDef, ToolPermissionResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
+from src.core.types import EventCallback, ToolDef, ToolPermissionResult, ToolResult, ToolUseContext, ToolCall, ToolCallGroup
 from src.tools import registry as tool_registry
-from src.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
+from src.core.events import ToolStart, ToolEnd, PermissionRequest, PermissionDenied
 
 logger = logging.getLogger(__name__)
 

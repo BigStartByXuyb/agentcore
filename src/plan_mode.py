@@ -10,7 +10,7 @@ import os
 import uuid
 from pathlib import Path
 
-from src.types import Attachment, ToolDef, ToolResult
+from src.core.types import Attachment, ToolDef, ToolResult
 
 
 # Module-level slug cache: session_id → slug string.

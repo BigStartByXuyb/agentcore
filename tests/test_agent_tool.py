@@ -39,7 +39,7 @@ from src.agents.explore import explore_agent
 from src.tools.agent import (
     _execute, _map_result, _resolve_tools, _DEFAULT_AGENT, AGENT_SCHEMA,
 )
-from src.types import ToolUseContext
+from src.core.types import ToolUseContext
 
 # Path to test fixtures
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "agents")
@@ -116,7 +116,7 @@ def test_resolve_tools_with_whitelist():
 # ---------------------------------------------------------------------------
 
 def _make_context(depth: int = 0) -> ToolUseContext:
-    from src.types import MessageHistory
+    from src.core.types import MessageHistory
     return ToolUseContext(messages=MessageHistory([]), tools=["bash", "read_file", "grep", "agent"], depth=depth)
 
 
@@ -190,7 +190,7 @@ def test_executor_no_prompt():
 
 def test_executor_depth_limit():
     """At max depth → error, no run_agent_loop call."""
-    from src import config
+    from src.core import config
     ctx = _make_context(depth=config.MAX_AGENT_DEPTH)
     result = _run_async(_execute({"description": "test", "prompt": "do something"}, ctx))
     assert result.data["success"] is False

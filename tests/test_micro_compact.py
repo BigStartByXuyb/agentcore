@@ -10,7 +10,7 @@ from src.compact.micro_compact import (
     _collect_rounds,
     _find_last_assistant,
 )
-from src.types import (
+from src.core.types import (
     Message, ToolUseContent, ToolResultContent, TextContent,
 )
 

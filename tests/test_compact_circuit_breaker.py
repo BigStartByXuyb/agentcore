@@ -10,8 +10,8 @@ from src.compact.auto_compact import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     BLOCKING_LIMIT_BUFFER_TOKENS,
 )
-from src.errors import is_prompt_too_long
-from src.types import MessageHistory, Message, TextContent
+from src.core.errors import is_prompt_too_long
+from src.core.types import MessageHistory, Message, TextContent
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ class TestBlockingLimit:
         assert is_at_blocking_limit(100_000) is False
 
     def test_at_limit(self):
-        from src import config
+        from src.core import config
         threshold = config.MAX_CONTEXT_WINDOW - BLOCKING_LIMIT_BUFFER_TOKENS
         assert is_at_blocking_limit(threshold) is True
 

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, Callable
 from src.providers.stream import ProviderStream
 
 if TYPE_CHECKING:
-    from src.types import Message
+    from src.core.types import Message
 
 # Signature: (delay_seconds, attempt, max_attempts)
 RetryCallback = Callable[[float, int, int], None]

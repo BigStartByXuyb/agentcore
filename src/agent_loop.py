@@ -23,8 +23,8 @@ from typing import Any, Callable
 
 import anthropic.types
 
-from src import config
-from src.types import (
+from src.core import config
+from src.core.types import (
     AgentState, Attachment, ContentBlock, EventCallback, Message, MessageHistory,
     TextContent, ThinkingContent, RedactedThinkingContent, ToolResultContent, ToolUseContent,
     ToolUseContext, ToolCallGroup,
@@ -35,8 +35,8 @@ from src.messages import build_skill_reminder, build_agent_reminder, build_memor
 from src.tool_runner import merge_tool_call, execute_tool_groups, StreamingToolExecutor, DenialAbortError, DenialTracker
 from src.tools import registry as tool_registry
 from src.api import query_model, create_stream_with_retry
-from src.errors import create_assistant_error_message, is_prompt_too_long
-from src.events import (
+from src.core.errors import create_assistant_error_message, is_prompt_too_long
+from src.core.events import (
     AgentEvent, TextDelta, TextBlock, ThinkingBlock, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
     CompactCircuitBreaker, BlockingLimitReached,
@@ -481,7 +481,7 @@ async def agent_loop(
     main_tools = tool_registry.list_names()
 
     # --- Independent reminder channels (each can be reloaded separately) ---
-    from src.types import PlanPhase
+    from src.core.types import PlanPhase
 
     def _build_attachments() -> list[Attachment]:
         s = build_skill_reminder(main_tools, use_sent_tracking=True)
@@ -717,7 +717,7 @@ def _is_fatal_error(error: Exception) -> bool:
     These errors will persist no matter how many times we retry,
     so the agent loop should break instead of continue.
     """
-    from src.errors import classify_api_error, AgentErrorCode
+    from src.core.errors import classify_api_error, AgentErrorCode
     code = classify_api_error(error)
     return code in (AgentErrorCode.API_AUTH_ERROR,)
 
@@ -825,7 +825,7 @@ def _get_permission_engine():
     global _permission_engine
     if _permission_engine is None:
         from src.permissions import PermissionEngine
-        from src.config import get_permission_config_paths
+        from src.core.config import get_permission_config_paths
         user_config, project_config = get_permission_config_paths()
         _permission_engine = PermissionEngine(
             user_config=user_config,

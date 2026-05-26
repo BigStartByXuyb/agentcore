@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from src.types import ToolResult, ToolDef, ToolUseContext
+from src.core.types import ToolResult, ToolDef, ToolUseContext
 from src.utils.file_state_cache import FileState
 
 # --- quote normalization (matches Claude Code FileEditTool/utils.ts) ---

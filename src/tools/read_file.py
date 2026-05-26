@@ -11,14 +11,14 @@ from __future__ import annotations
 import asyncio
 import os
 
-from src.types import ToolResult, ToolDef, ToolUseContext
+from src.core.types import ToolResult, ToolDef, ToolUseContext
 from src.utils.file_state_cache import FileState
 from src.utils.file_encoding import (
     is_blocked_path,
     is_special_file,
     read_file_streaming,
 )
-from src import config
+from src.core import config
 
 SCHEMA: dict = {
     "name": "read_file",

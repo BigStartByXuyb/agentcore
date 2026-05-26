@@ -16,8 +16,8 @@ import types
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src import config
-from src.types import (
+from src.core import config
+from src.core.types import (
     AgentState, Message, ThinkingContent, RedactedThinkingContent,
     TextContent, ToolUseContent,
 )
@@ -33,7 +33,7 @@ from src.agent_loop import (
     run_agent_loop,
 )
 from src.display import default_handler
-from src.events import ThinkingBlock
+from src.core.events import ThinkingBlock
 
 
 # ===================================================================
@@ -340,7 +340,7 @@ class TestThinkingRecovery:
     def test_thinking_400_triggers_strip_and_retry(self):
         from unittest.mock import AsyncMock
         from anthropic import APIError
-        from src.types import ToolUseContext, MessageHistory
+        from src.core.types import ToolUseContext, MessageHistory
         import asyncio
 
         err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
@@ -372,7 +372,7 @@ class TestThinkingRecovery:
     def test_non_thinking_400_not_recovered(self):
         from unittest.mock import AsyncMock
         from anthropic import APIError
-        from src.types import ToolUseContext, MessageHistory
+        from src.core.types import ToolUseContext, MessageHistory
         import asyncio
 
         err = APIError(message="malformed request", request=MagicMock(), body=None)

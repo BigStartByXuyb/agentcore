@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.types import ToolResultContent, Attachment
+from src.core.types import ToolResultContent, Attachment
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import logging
 
-from src import config
+from src.core import config
 from src.memory.paths import get_memory_dir, get_memory_dir_display, get_memory_entrypoint, ensure_memory_dir
 
 logger = logging.getLogger(__name__)

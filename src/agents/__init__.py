@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.frontmatter import parse_frontmatter
-from src.types import Attachment
+from src.core.types import Attachment
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def discover_agents(agents_dirs: list[str] | None = None) -> dict[str, AgentDefi
     agents: dict[str, AgentDefinition] = dict(_BUILTIN_AGENTS)
 
     if agents_dirs is None:
-        from src.config import get_agent_dirs
+        from src.core.config import get_agent_dirs
         agents_dirs = get_agent_dirs()
 
     for base_dir in agents_dirs:

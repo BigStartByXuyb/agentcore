@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 
-from src.types import ToolResult, ToolDef, ToolUseContext
+from src.core.types import ToolResult, ToolDef, ToolUseContext
 
 SCHEMA: dict = {
     "name": "grep",

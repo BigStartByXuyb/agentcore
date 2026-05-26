@@ -6,7 +6,7 @@ Corresponds to Claude Code's TaskStore (simplified).
 
 from __future__ import annotations
 
-from src.types import TaskItem, TaskStatus
+from src.core.types import TaskItem, TaskStatus
 
 
 class TaskStore:

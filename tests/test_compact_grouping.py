@@ -5,7 +5,7 @@ from src.compact.grouping import (
     truncate_head,
     ensure_tool_result_pairing,
 )
-from src.types import (
+from src.core.types import (
     Message,
     TextContent,
     ToolUseContent,

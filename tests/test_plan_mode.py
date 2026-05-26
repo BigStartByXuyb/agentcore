@@ -14,7 +14,7 @@ from src.plan_mode import (
     make_plan_mode_overrides,
     clear_slug_cache,
 )
-from src.types import AgentState, PlanPhase, ToolResult
+from src.core.types import AgentState, PlanPhase, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ class TestMakePlanModeOverrides:
     @pytest.fixture
     def mock_registry(self):
         """Minimal mock registry with write_file and edit_file."""
-        from src.types import ToolDef
+        from src.core.types import ToolDef
 
         async def _write_exec(inputs, ctx):
             return ToolResult(data={"type": "text", "content": "written"})

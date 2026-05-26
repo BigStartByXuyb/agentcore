@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from src.types import ToolResult, ToolDef, ToolUseContext
+from src.core.types import ToolResult, ToolDef, ToolUseContext
 from src.utils.file_state_cache import FileState
 
 SCHEMA: dict = {

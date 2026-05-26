@@ -26,12 +26,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
-from src import config
+from src.core import config
 from src.providers import get_provider
 from src.providers.base import ProviderStreamCM
 
 if TYPE_CHECKING:
-    from src.types import Message
+    from src.core.types import Message
 
 # Retry callback signature — (delay_seconds, attempt, max_attempts) -> None
 _RetryCb = Callable[[float, int, int], None]

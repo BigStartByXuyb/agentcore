@@ -13,8 +13,8 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
-from src import config
-from src.types import (
+from src.core import config
+from src.core.types import (
     AgentState,
     Message,
     MessageHistory,

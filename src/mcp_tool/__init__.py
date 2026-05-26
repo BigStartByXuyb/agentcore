@@ -16,7 +16,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from src.mcp_tool.config import McpServerConfig, load_mcp_configs, config_hash
-from src.types import ToolDef, ToolResult
+from src.core.types import ToolDef, ToolResult
 from typing import Any, Callable, TYPE_CHECKING
 from src.mcp_tool.McpHttpClient import McpHttpClient
 from src.mcp_tool.McpPipelineClient import McpPipelineClient

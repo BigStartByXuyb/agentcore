@@ -18,9 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from anthropic import APIError, APIConnectionError
 
-from src.errors import AgentErrorCode, classify_api_error, create_assistant_error_message
+from src.core.errors import AgentErrorCode, classify_api_error, create_assistant_error_message
 from src.messages import build_tool_result_content
-from src.types import ToolResult, ToolUseContext
+from src.core.types import ToolResult, ToolUseContext
 
 
 import asyncio as _asyncio
@@ -67,7 +67,7 @@ class TestClassifyApiError:
         err = MagicMock(spec=APIError)
         err.status_code = 429
         # Patch isinstance
-        with patch("src.errors.isinstance", side_effect=lambda obj, cls: cls == APIError or cls in (APIError,)):
+        with patch("src.core.errors.isinstance", side_effect=lambda obj, cls: cls == APIError or cls in (APIError,)):
             # Use direct approach
             pass
         # Simpler: just test classify logic directly
@@ -202,7 +202,7 @@ class TestRunToolUse:
 
     def test_executor_exception(self):
         from src.tools import registry
-        from src.types import ToolDef
+        from src.core.types import ToolDef
 
         async def bad_executor(inputs, ctx):
             raise ValueError("boom")
@@ -223,7 +223,7 @@ class TestRunToolUse:
 
     def test_map_result_exception(self):
         from src.tools import registry
-        from src.types import ToolDef
+        from src.core.types import ToolDef
 
         async def ok_executor(inputs, ctx):
             return ToolResult(data={"ok": True})
@@ -246,7 +246,7 @@ class TestRunToolUse:
 
     def test_success_returns_false(self):
         from src.tools import registry
-        from src.types import ToolDef
+        from src.core.types import ToolDef
 
         registry.register("_test_ok", ToolDef(
             schema={"name": "_test_ok"},
@@ -268,7 +268,7 @@ class TestRunToolUse:
 class TestRecoverOrphanToolResults:
     def test_no_orphans(self):
         from src.agent_loop import _recover_orphan_tool_results
-        from src.types import ToolUseContent, ToolResultContent
+        from src.core.types import ToolUseContent, ToolResultContent
         assistant_content = [
             ToolUseContent(id="t1", name="bash", input={}),
         ]
@@ -280,7 +280,7 @@ class TestRecoverOrphanToolResults:
 
     def test_one_orphan(self):
         from src.agent_loop import _recover_orphan_tool_results
-        from src.types import ToolUseContent, ToolResultContent
+        from src.core.types import ToolUseContent, ToolResultContent
         assistant_content = [
             ToolUseContent(id="t1", name="bash", input={}),
             ToolUseContent(id="t2", name="read_file", input={}),
@@ -296,7 +296,7 @@ class TestRecoverOrphanToolResults:
 
     def test_no_tool_use_blocks(self):
         from src.agent_loop import _recover_orphan_tool_results
-        from src.types import TextContent
+        from src.core.types import TextContent
         assistant_content = [
             TextContent(text="hello"),
         ]
@@ -316,7 +316,7 @@ class TestAgentLoopApiErrorRecovery:
         import asyncio
         from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
-        from src.types import ToolUseContext, AgentState, MessageHistory, Message
+        from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
 
         mock_query = AsyncMock(side_effect=APIConnectionError(request=MagicMock()))
 
@@ -342,7 +342,7 @@ class TestAgentLoopApiErrorRecovery:
         import asyncio
         from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
-        from src.types import ToolUseContext, AgentState, MessageHistory, Message
+        from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
 
         mock_query = AsyncMock(side_effect=Exception("unexpected boom"))
 

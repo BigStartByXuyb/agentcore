@@ -24,8 +24,8 @@ This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 
 from __future__ import annotations
 
-from src import config
-from src.types import (
+from src.core import config
+from src.core.types import (
     AgentState,
     Message,
     MessageHistory,
@@ -34,7 +34,7 @@ from src.types import (
     ToolUseContext,
 )
 from src.skills import get_skill, build_skill_content
-from src.types import InvokedSkillInfo
+from src.core.types import InvokedSkillInfo
 
 
 # ---------------------------------------------------------------------------

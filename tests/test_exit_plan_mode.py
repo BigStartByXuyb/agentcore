@@ -7,7 +7,7 @@ from unittest import mock
 import pytest
 
 from src.tools.exit_plan_mode import tool, SCHEMA, check_permissions
-from src.types import AgentState, PlanPhase
+from src.core.types import AgentState, PlanPhase
 
 
 # ---------------------------------------------------------------------------

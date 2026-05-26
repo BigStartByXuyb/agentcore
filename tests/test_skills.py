@@ -43,7 +43,7 @@ from src.skills import (
 )
 from src.messages import build_skill_reminder
 from src.tools.skill import _execute, _map_result
-from src.types import ToolUseContext, MessageHistory
+from src.core.types import ToolUseContext, MessageHistory
 
 
 def test_parse_frontmatter_basic():
@@ -406,7 +406,7 @@ def test_skill_executor_fork_depth_limit():
     """Test fork skill rejects when depth limit is reached."""
     _load_fixtures()
 
-    from src import config
+    from src.core import config
     max_depth = config.MAX_AGENT_DEPTH
 
     ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"], depth=max_depth)

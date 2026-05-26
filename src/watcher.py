@@ -77,13 +77,13 @@ class _DebouncedNotifier:
 
 def _get_skill_dirs() -> list[str]:
     """Return skill directories (guaranteed to exist)."""
-    from src.config import get_skill_dirs
+    from src.core.config import get_skill_dirs
     return get_skill_dirs()
 
 
 def _get_agent_dirs() -> list[str]:
     """Return agent directories (guaranteed to exist)."""
-    from src.config import get_agent_dirs
+    from src.core.config import get_agent_dirs
     return get_agent_dirs()
 
 
@@ -123,7 +123,7 @@ def _reload_permissions() -> None:
 
 def _get_permission_config_paths() -> list[str]:
     """Return permission config file paths (that exist on disk)."""
-    from src.config import get_permission_config_paths
+    from src.core.config import get_permission_config_paths
     return [p for p in get_permission_config_paths() if os.path.isfile(p)]
 
 

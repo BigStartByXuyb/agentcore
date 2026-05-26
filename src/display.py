@@ -13,8 +13,8 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-from src.types import EventCallback
-from src.events import (
+from src.core.types import EventCallback
+from src.core.events import (
     AgentEvent,
     TextDelta,
     TextBlock,

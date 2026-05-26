@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import logging
 
-from src import config
+from src.core import config
 from src.api import side_query
 from src.compact.prompt import get_compact_prompt, get_compact_user_summary
 from src.compact.grouping import truncate_head, MAX_PTL_RETRIES
-from src.errors import is_prompt_too_long
-from src.types import MessageHistory, Message
+from src.core.errors import is_prompt_too_long
+from src.core.types import MessageHistory, Message
 
 logger = logging.getLogger(__name__)
 

@@ -14,8 +14,8 @@ import os
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from src import config
-from src.types import Attachment
+from src.core import config
+from src.core.types import Attachment
 
 _DIFF_CONTEXT_LINES = 8
 _DIFF_SNIPPET_MAX_CHARS = 8192

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.types import (
+from src.core.types import (
     Message,
     TextContent,
     ToolUseContent,
@@ -23,7 +23,7 @@ from src.types import (
 )
 
 if TYPE_CHECKING:
-    from src.types import ContentBlock
+    from src.core.types import ContentBlock
 
 MAX_PTL_RETRIES = 3
 

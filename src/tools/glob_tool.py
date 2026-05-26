@@ -17,7 +17,7 @@ import shutil
 import time
 from pathlib import Path
 
-from src.types import ToolDef, ToolResult, ToolUseContext
+from src.core.types import ToolDef, ToolResult, ToolUseContext
 
 logger = logging.getLogger(__name__)
 

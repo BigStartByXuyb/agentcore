@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.frontmatter import parse_frontmatter  # noqa: F401 — re-exported for back-compat
-from src.types import Attachment
+from src.core.types import Attachment
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ def discover_skills(skills_dirs: list[str] | None = None) -> dict[str, SkillInfo
     Later entries override earlier ones (project skills override global).
     """
     if skills_dirs is None:
-        from src.config import get_skill_dirs
+        from src.core.config import get_skill_dirs
         skills_dirs = get_skill_dirs()
 
     skills: dict[str, SkillInfo] = {}

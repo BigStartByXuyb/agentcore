@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import ItemsView
 
-from src.types import ToolDef
+from src.core.types import ToolDef
 from src.tools.bash import tool as bash_tool
 from src.tools.read_file import tool as read_file_tool
 from src.tools.write_file import tool as write_file_tool

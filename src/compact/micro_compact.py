@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 import time
 
-from src import config
-from src.types import Message, ToolResultContent, ToolUseContent
+from src.core import config
+from src.core.types import Message, ToolResultContent, ToolUseContent
 
 logger = logging.getLogger(__name__)
 

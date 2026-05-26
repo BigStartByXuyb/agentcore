@@ -18,8 +18,8 @@ import random
 import logging
 from typing import Any, AsyncIterator
 
-from src import config
-from src.types import Message
+from src.core import config
+from src.core.types import Message
 from src.providers.base import RetryCallback, ProviderStreamCM
 from src.providers.types import (
     ProviderMessage,

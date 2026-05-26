@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.types import ToolDef, ToolResult, ToolPermissionResult, ToolUseContext
+from src.core.types import ToolDef, ToolResult, ToolPermissionResult, ToolUseContext
 
 SCHEMA: dict = {
     "name": "TaskCreate",

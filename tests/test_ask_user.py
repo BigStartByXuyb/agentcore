@@ -5,7 +5,7 @@ from unittest import mock
 import pytest
 
 from src.tools.ask_user import tool, SCHEMA, check_permissions
-from src.events import UserQuestionRequest
+from src.core.events import UserQuestionRequest
 
 
 # ---------------------------------------------------------------------------

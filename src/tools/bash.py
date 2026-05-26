@@ -6,7 +6,7 @@ import asyncio
 import shutil
 import re
 
-from src.types import ToolResult, ToolDef, ToolUseContext
+from src.core.types import ToolResult, ToolDef, ToolUseContext
 from src.sandbox import sandbox_manager
 
 SCHEMA: dict = {

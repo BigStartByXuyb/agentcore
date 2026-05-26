@@ -5,8 +5,8 @@ Corresponds to Claude Code's src/utils/tokens.ts.
 
 from __future__ import annotations
 
-from src import config
-from src.types import MessageHistory, AgentState
+from src.core import config
+from src.core.types import MessageHistory, AgentState
 
 
 def estimate_token_count(history: MessageHistory, state: AgentState | None = None) -> int:

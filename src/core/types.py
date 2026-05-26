@@ -14,7 +14,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from src.events import AgentEvent
+    from src.core.events import AgentEvent
 
 EventCallback = Callable[["AgentEvent"], None]
 

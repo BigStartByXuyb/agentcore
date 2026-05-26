@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 
-from src.types import ToolDef, ToolPermissionResult, ToolResult, ToolUseContext
-from src.events import UserQuestionRequest
+from src.core.types import ToolDef, ToolPermissionResult, ToolResult, ToolUseContext
+from src.core.events import UserQuestionRequest
 
 
 SCHEMA: dict = {

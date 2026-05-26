@@ -34,7 +34,7 @@ from typing import Any, AsyncIterator
 import anthropic
 from anthropic import APIError, APIConnectionError
 
-from src import config
+from src.core import config
 from src.providers.base import RetryCallback, ProviderStreamCM
 from src.providers.types import (
     ProviderMessage,
@@ -45,7 +45,7 @@ from src.providers.types import (
     Usage,
 )
 from src.providers.stream import StreamEvent
-from src.types import (
+from src.core.types import (
     Message,
     ContentBlock,
     TextContent,

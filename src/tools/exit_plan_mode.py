@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from src.types import ToolDef, ToolPermissionResult, ToolResult, ToolUseContext
+from src.core.types import ToolDef, ToolPermissionResult, ToolResult, ToolUseContext
 
 
 SCHEMA: dict = {
@@ -35,7 +35,7 @@ SCHEMA: dict = {
 
 def check_permissions(inputs: dict, context: ToolUseContext) -> ToolPermissionResult:
     """Always ask user for plan approval — mirrors Claude Code's ExitPlanMode permission."""
-    from src.types import PlanPhase
+    from src.core.types import PlanPhase
 
     state = context.agent_state
     if not state or state.plan_phase != PlanPhase.ACTIVE:
@@ -55,7 +55,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
 
     Only runs if the permission system approved (user said "yes").
     """
-    from src.types import PlanPhase
+    from src.core.types import PlanPhase
 
     state = context.agent_state
     if not state or state.plan_phase != PlanPhase.ACTIVE or not state.plan_file_path:

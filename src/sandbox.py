@@ -19,7 +19,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
-from src import config
+from src.core import config
 
 logger = logging.getLogger(__name__)
 

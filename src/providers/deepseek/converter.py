@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.types import (
+from src.core.types import (
     Message,
     ContentBlock,
     TextContent,

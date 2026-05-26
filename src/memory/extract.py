@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 import os
 
-from src import config
-from src.types import (
+from src.core import config
+from src.core.types import (
     AgentState, EventCallback, Message, MessageHistory,
     ToolResult, ToolDef, TextContent, ToolUseContent, ToolUseContext,
 )

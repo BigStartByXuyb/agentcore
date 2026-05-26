@@ -11,7 +11,7 @@ import os
 import logging
 from datetime import datetime, timezone
 
-from src.types import MemoryHeader, MemoryType
+from src.core.types import MemoryHeader, MemoryType
 from src.frontmatter import parse_frontmatter
 logger = logging.getLogger(__name__)
 

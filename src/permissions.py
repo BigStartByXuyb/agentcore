@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from src.types import ToolPermissionResult
+from src.core.types import ToolPermissionResult
 
 logger = logging.getLogger(__name__)
 

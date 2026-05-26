@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 import logging
 
-from src import config
-from src.types import MemoryHeader, MessageHistory, Message
+from src.core import config
+from src.core.types import MemoryHeader, MessageHistory, Message
 from src.api import side_query
 from src.memory.scan import scan_memory_files, format_memory_manifest
 

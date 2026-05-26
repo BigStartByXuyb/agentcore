@@ -9,8 +9,8 @@ from src.compact.auto_compact import (
     should_auto_compact,
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     BLOCKING_LIMIT_BUFFER_TOKENS,
-    _is_prompt_too_long,
 )
+from src.errors import is_prompt_too_long
 from src.types import MessageHistory, Message, TextContent
 
 
@@ -32,21 +32,21 @@ class TestBlockingLimit:
 
 
 # ---------------------------------------------------------------------------
-# _is_prompt_too_long
+# is_prompt_too_long
 # ---------------------------------------------------------------------------
 
 class TestIsPromptTooLong:
     def test_detects_prompt_too_long(self):
         err = Exception("prompt is too long: 150000 > 128000")
-        assert _is_prompt_too_long(err) is True
+        assert is_prompt_too_long(err) is True
 
     def test_detects_prompt_too_long_variant(self):
         err = Exception("error: prompt_too_long")
-        assert _is_prompt_too_long(err) is True
+        assert is_prompt_too_long(err) is True
 
     def test_rejects_other_errors(self):
         err = Exception("connection timeout")
-        assert _is_prompt_too_long(err) is False
+        assert is_prompt_too_long(err) is False
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,8 @@ class TestAutoCompactRetry:
             result = await auto_compact(history)
 
         assert result is False
-        assert call_count == 1  # no retry for non-PTL errors
+        # 2 calls: primary (with thinking) + fallback (without thinking)
+        assert call_count == 2
 
     @pytest.mark.asyncio
     async def test_empty_history(self):

@@ -35,7 +35,7 @@ from src.messages import build_skill_reminder, build_agent_reminder, build_memor
 from src.tool_runner import merge_tool_call, execute_tool_groups, StreamingToolExecutor, DenialAbortError, DenialTracker
 from src.tools import registry as tool_registry
 from src.api import query_model, create_stream_with_retry
-from src.errors import create_assistant_error_message
+from src.errors import create_assistant_error_message, is_prompt_too_long
 from src.events import (
     AgentEvent, TextDelta, TextBlock, ThinkingBlock, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
@@ -46,9 +46,10 @@ from src.memory.recall import find_relevant_memories
 from src.memory.paths import get_memory_dir
 from src.compact.micro_compact import should_micro_compact, micro_compact
 from src.compact.auto_compact import (
-    should_auto_compact, auto_compact, estimate_token_count,
+    should_auto_compact, auto_compact,
     is_at_blocking_limit, MAX_CONSECUTIVE_COMPACT_FAILURES,
 )
+from src.utils.tokens import estimate_token_count
 from src.task_store import TaskStore
 
 logger = logging.getLogger(__name__)
@@ -224,7 +225,7 @@ async def run_agent_loop(
     max_turns: int,
     label: str = "main",
     stream: bool = False,
-    thinking: dict | None = None,
+    thinking: bool = False,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
 ) -> str:
@@ -367,7 +368,7 @@ async def run_agent_loop(
                 on_event(ev)
 
             # Layer 3: reactive compact on prompt_too_long (bypasses circuit breaker)
-            if _is_prompt_too_long(api_error):
+            if is_prompt_too_long(api_error):
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
                 file_snapshot = cache.snapshot() if cache is not None else {}
                 if await auto_compact(history):
@@ -380,7 +381,7 @@ async def run_agent_loop(
                     _state.compact_consecutive_failures += 1
 
             final_error: Exception | None = api_error
-            if _is_thinking_400(api_error) and thinking is not None:
+            if _is_thinking_400(api_error) and thinking:
                 on_event(Recovery(label=label, message="Stripping thinking blocks and retrying..."))
                 _clean_thinking_history(history.messages)
                 pending_retry_events.clear()
@@ -542,7 +543,7 @@ async def agent_loop(
         max_turns=config.MAX_TURNS,
         label="main",
         stream=True,
-        thinking=_build_thinking_param(),
+        thinking=config.THINKING_ENABLED,
         on_event=handler,
         on_compact_rebuild=_rebuild_after_compact,
     )
@@ -574,7 +575,7 @@ async def _stream_call(
     history: MessageHistory,
     system_prompt: str,
     tools: list[dict],
-    thinking: dict | None,
+    thinking: bool,
     on_retry: Callable[[float, int, int], None] | None,
     label: str,
     tool_executor: StreamingToolExecutor | None = None,
@@ -710,17 +711,6 @@ def extract_text(content_blocks: list) -> str:
 # Thinking helpers
 # ---------------------------------------------------------------------------
 
-
-def _build_thinking_param() -> dict | None:
-    """Build the thinking parameter dict for the API call, or None if disabled."""
-    if not config.THINKING_ENABLED:
-        return None
-    budget = min(config.THINKING_BUDGET_TOKENS, config.MAX_TOKENS - 1)
-    if budget <= 0:
-        return None
-    return {"type": "enabled", "budget_tokens": budget}
-
-
 def _is_fatal_error(error: Exception) -> bool:
     """Check if an API error is non-recoverable (auth, permission, bad key).
 
@@ -731,37 +721,6 @@ def _is_fatal_error(error: Exception) -> bool:
     code = classify_api_error(error)
     return code in (AgentErrorCode.API_AUTH_ERROR,)
 
-
-def _is_prompt_too_long(error: Exception) -> bool:
-    """Check if API error is a prompt-too-long error (400/413)."""
-    status: int | None = None
-
-    try:
-        from anthropic import APIError as _AnthrAPIError
-        if isinstance(error, _AnthrAPIError):
-            status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    except ImportError:
-        pass
-
-    if status is None:
-        try:
-            from openai import APIError as _OaiAPIError
-            if isinstance(error, _OaiAPIError):
-                status = getattr(error, "status_code", None) or getattr(error, "status", None)
-        except ImportError:
-            pass
-
-    if status is None:
-        msg = str(error).lower()
-        return "prompt is too long" in msg or "context_length_exceeded" in msg
-
-    if status == 413:
-        return True
-    if status == 400:
-        msg = str(error).lower()
-        return ("prompt is too long" in msg or "too many tokens" in msg
-                or "context_length_exceeded" in msg)
-    return False
 
 
 def _is_thinking_400(error: Exception) -> bool:

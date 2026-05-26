@@ -117,14 +117,15 @@ class DeepSeekAdapter:
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
     ) -> ProviderMessage:
         from openai import APIError, APIConnectionError
 
         client = self.get_client()
-        resolved_model = model or config.DEEPSEEK_MODEL
+        default_model = config.DEEPSEEK_REASONER_MODEL if thinking else config.DEEPSEEK_MODEL
+        resolved_model = model or default_model
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
 
         oai_messages = converter.messages_to_openai(messages, system)
@@ -193,10 +194,12 @@ class DeepSeekAdapter:
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
     ) -> ProviderStreamCM:
+        if thinking and model is None:
+            model = config.DEEPSEEK_REASONER_MODEL
         return _DeepSeekStreamWithRetry(
             adapter=self,
             messages=messages,
@@ -218,6 +221,7 @@ class DeepSeekAdapter:
         messages: list[Message],
         max_tokens: int = 256,
         output_format: dict | None = None,
+        thinking: bool = False,
     ) -> ProviderMessage:
         from openai import APIError, APIConnectionError
 

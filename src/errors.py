@@ -140,6 +140,39 @@ _ERROR_MESSAGES: dict[AgentErrorCode, str] = {
 }
 
 
+def is_prompt_too_long(error: Exception) -> bool:
+    """Detect prompt-too-long errors from any supported provider."""
+    status: int | None = None
+
+    try:
+        from anthropic import APIError as _AnthrAPIError
+        if isinstance(error, _AnthrAPIError):
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    except ImportError:
+        pass
+
+    if status is None:
+        try:
+            from openai import APIError as _OaiAPIError
+            if isinstance(error, _OaiAPIError):
+                status = getattr(error, "status_code", None) or getattr(error, "status", None)
+        except ImportError:
+            pass
+
+    if status is None:
+        msg = str(error).lower()
+        return ("prompt is too long" in msg or "prompt_too_long" in msg
+                or "context_length_exceeded" in msg)
+
+    if status == 413:
+        return True
+    if status == 400:
+        msg = str(error).lower()
+        return ("prompt is too long" in msg or "prompt_too_long" in msg
+                or "too many tokens" in msg or "context_length_exceeded" in msg)
+    return False
+
+
 def create_assistant_error_message(error: Exception) -> dict:
     """Build a synthetic assistant message from an error.
 

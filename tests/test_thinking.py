@@ -3,7 +3,7 @@
 Covers:
   - config defaults
   - _serialize_content() handling of thinking blocks
-  - _build_thinking_param() logic
+  - _build_thinking_dict() logic (Anthropic adapter)
   - _is_thinking_400() detection
   - _clean_thinking_history() in-place cleanup
   - strip_thinking_blocks() / filter_orphaned_thinking_messages()
@@ -28,7 +28,6 @@ from src.messages import (
 )
 from src.agent_loop import (
     _serialize_content,
-    _build_thinking_param,
     _is_thinking_400,
     _clean_thinking_history,
     run_agent_loop,
@@ -113,33 +112,34 @@ class TestSerializeThinking:
 
 
 # ===================================================================
-# _build_thinking_param
+# _build_thinking_dict (Anthropic adapter level — returns API dict)
 # ===================================================================
 
-class TestBuildThinkingParam:
+class TestBuildThinkingDict:
     def test_enabled(self):
+        from src.providers.anthropic.adapter import _build_thinking_dict
         with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 10000), \
-             patch.object(config, "MAX_TOKENS", 16384):
-            result = _build_thinking_param()
+             patch.object(config, "THINKING_BUDGET_TOKENS", 10000):
+            result = _build_thinking_dict(max_tokens=16384)
             assert result == {"type": "enabled", "budget_tokens": 10000}
 
     def test_disabled(self):
+        from src.providers.anthropic.adapter import _build_thinking_dict
         with patch.object(config, "THINKING_ENABLED", False):
-            assert _build_thinking_param() is None
+            assert _build_thinking_dict(max_tokens=16384) is None
 
     def test_budget_capped_to_max_tokens_minus_1(self):
+        from src.providers.anthropic.adapter import _build_thinking_dict
         with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 20000), \
-             patch.object(config, "MAX_TOKENS", 8000):
-            result = _build_thinking_param()
+             patch.object(config, "THINKING_BUDGET_TOKENS", 20000):
+            result = _build_thinking_dict(max_tokens=8000)
             assert result["budget_tokens"] == 7999
 
     def test_zero_budget_returns_none(self):
+        from src.providers.anthropic.adapter import _build_thinking_dict
         with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 0), \
-             patch.object(config, "MAX_TOKENS", 100):
-            assert _build_thinking_param() is None
+             patch.object(config, "THINKING_BUDGET_TOKENS", 0):
+            assert _build_thinking_dict(max_tokens=100) is None
 
 
 # ===================================================================
@@ -363,7 +363,7 @@ class TestThinkingRecovery:
                 system_prompt="test",
                 tool_use_context=ctx,
                 max_turns=3,
-                thinking={"type": "enabled", "budget_tokens": 5000},
+                thinking=True,
                 on_event=lambda _: None,
             ))
         assert result == "recovered"
@@ -388,7 +388,7 @@ class TestThinkingRecovery:
                 system_prompt="test",
                 tool_use_context=ctx,
                 max_turns=3,
-                thinking={"type": "enabled", "budget_tokens": 5000},
+                thinking=True,
                 on_event=lambda _: None,
             ))
         assert "max turns" in result.lower()

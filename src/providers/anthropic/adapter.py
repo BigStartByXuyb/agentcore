@@ -146,6 +146,19 @@ def _messages_to_anthropic(messages: list[Message]) -> list[dict]:
 # AnthropicAdapter — implements ProviderAdapter Protocol
 # ---------------------------------------------------------------------------
 
+def _build_thinking_dict(max_tokens: int) -> dict | None:
+    """Build Anthropic-specific thinking param from config, or None if disabled.
+
+    budget_tokens must be < max_tokens (API constraint).
+    """
+    if not config.THINKING_ENABLED:
+        return None
+    budget = min(config.THINKING_BUDGET_TOKENS, max_tokens - 1)
+    if budget <= 0:
+        return None
+    return {"type": "enabled", "budget_tokens": budget}
+
+
 class AnthropicAdapter:
     """Native Claude API adapter (passthrough, no format translation).
 
@@ -186,7 +199,7 @@ class AnthropicAdapter:
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
     ) -> anthropic.types.Message:
@@ -195,6 +208,8 @@ class AnthropicAdapter:
         resolved_model = model or config.MODEL
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
         api_messages = _messages_to_anthropic(messages)
+
+        thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None
 
         last_error: Exception | None = None
 
@@ -207,8 +222,8 @@ class AnthropicAdapter:
                     tools=tools,
                     messages=api_messages,
                 )
-                if thinking is not None:
-                    params["thinking"] = thinking
+                if thinking_dict is not None:
+                    params["thinking"] = thinking_dict
                 return await client.messages.create(**params)
 
             except APIConnectionError as e:
@@ -261,7 +276,7 @@ class AnthropicAdapter:
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
     ) -> ProviderStreamCM:
@@ -271,6 +286,8 @@ class AnthropicAdapter:
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
         api_messages = _messages_to_anthropic(messages)
 
+        thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None
+
         params: dict[str, Any] = dict(
             model=resolved_model,
             max_tokens=resolved_max_tokens,
@@ -278,8 +295,8 @@ class AnthropicAdapter:
             tools=tools,
             messages=api_messages,
         )
-        if thinking is not None:
-            params["thinking"] = thinking
+        if thinking_dict is not None:
+            params["thinking"] = thinking_dict
 
         return _AsyncStreamWithRetry(
             client=client,
@@ -298,10 +315,12 @@ class AnthropicAdapter:
         messages: list[Message],
         max_tokens: int = 256,
         output_format: dict | None = None,
+        thinking: bool = False,
     ) -> anthropic.types.Message:
         """Lightweight LLM call for side tasks."""
         client = self.get_client()
         api_messages = _messages_to_anthropic(messages)
+        thinking_dict = _build_thinking_dict(max_tokens) if thinking else None
         last_error: Exception | None = None
 
         for attempt in range(1, DEFAULT_MAX_RETRIES + 2):
@@ -314,6 +333,8 @@ class AnthropicAdapter:
                 )
                 if output_format is not None:
                     params["response_format"] = output_format
+                if thinking_dict is not None:
+                    params["thinking"] = thinking_dict
                 return await client.messages.create(**params)
 
             except APIConnectionError as e:

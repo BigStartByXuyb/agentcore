@@ -15,6 +15,13 @@ Design contract (async):
 
 The duck-typing contract means agent_loop never needs provider-specific
 branches. Anthropic's native Message already matches ProviderMessage shape.
+
+Thinking parameter:
+  All three methods accept `thinking: bool`. When True, each adapter
+  enables its own thinking mechanism internally:
+    - Anthropic: sends {"type": "enabled", "budget_tokens": ...}
+    - DeepSeek: switches to deepseek-reasoner model
+  Callers never build provider-specific thinking dicts.
 """
 
 from __future__ import annotations
@@ -52,15 +59,11 @@ class ProviderAdapter(Protocol):
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = 3,
         on_retry: RetryCallback | None = None,
     ) -> Any:
-        """Non-streaming message creation.
-
-        Receives list[Message] from prepare_messages(). Each adapter
-        converts to its own API format internally.
-        """
+        """Non-streaming message creation."""
         ...
 
     def stream_message(
@@ -71,14 +74,11 @@ class ProviderAdapter(Protocol):
         tools: list[dict],
         model: str | None = None,
         max_tokens: int | None = None,
-        thinking: dict | None = None,
+        thinking: bool = False,
         max_retries: int = 3,
         on_retry: RetryCallback | None = None,
     ) -> ProviderStreamCM:
-        """Streaming message creation.
-
-        Returns an *async* context manager yielding a ProviderStream.
-        """
+        """Streaming message creation."""
         ...
 
     async def side_query(
@@ -89,9 +89,7 @@ class ProviderAdapter(Protocol):
         messages: list[Message],
         max_tokens: int = 256,
         output_format: dict | None = None,
+        thinking: bool = False,
     ) -> Any:
-        """Lightweight call for side tasks.
-
-        No tools, no streaming, no retry events.
-        """
+        """Lightweight call for side tasks (memory recall, compaction, etc)."""
         ...

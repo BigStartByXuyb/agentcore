@@ -80,7 +80,7 @@ async def query_model(
     tools: list[dict],
     model: str | None = None,
     max_tokens: int | None = None,
-    thinking: dict | None = None,
+    thinking: bool = False,
     max_retries: int = DEFAULT_MAX_RETRIES,
     on_retry: _RetryCb | None = None,
 ) -> Any:
@@ -105,7 +105,7 @@ def create_stream_with_retry(
     tools: list[dict],
     model: str | None = None,
     max_tokens: int | None = None,
-    thinking: dict | None = None,
+    thinking: bool = False,
     max_retries: int = DEFAULT_MAX_RETRIES,
     on_retry: _RetryCb | None = None,
 ) -> ProviderStreamCM:
@@ -137,6 +137,7 @@ async def side_query(
     messages: list[Message],
     max_tokens: int = 256,
     output_format: dict | None = None,
+    thinking: bool = False,
 ) -> Any:
     """Call the active provider's side_query (awaited)."""
     adapter = get_provider(config.PROVIDER)
@@ -146,6 +147,7 @@ async def side_query(
         messages=messages,
         max_tokens=max_tokens,
         output_format=output_format,
+        thinking=thinking,
     )
 
 

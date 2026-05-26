@@ -22,45 +22,14 @@ from src import config
 from src.api import side_query
 from src.compact.prompt import get_compact_prompt, get_compact_user_summary
 from src.compact.grouping import truncate_head, MAX_PTL_RETRIES
-from src.types import MessageHistory, Message, AgentState
+from src.errors import is_prompt_too_long
+from src.types import MessageHistory, Message
 
 logger = logging.getLogger(__name__)
 
 AUTOCOMPACT_BUFFER_TOKENS = 13_000
 MAX_CONSECUTIVE_COMPACT_FAILURES = 3
 BLOCKING_LIMIT_BUFFER_TOKENS = 3_000
-
-
-def estimate_token_count(history: MessageHistory, state: AgentState | None = None) -> int:
-    """Estimate current token count using hybrid approach.
-
-    If state has last_usage_tokens (from previous API call), uses that as base
-    and only estimates tokens for messages added since. Otherwise falls back to
-    full local estimation.
-
-    Claude Code uses: input_tokens + output_tokens + cache_tokens as base,
-    then estimates new messages at ~chars/4.
-    """
-    if state and state.last_usage_tokens > 0 and state.messages_since_last_usage > 0:
-        new_messages = history.messages[-state.messages_since_last_usage:]
-        new_estimate = _rough_estimate_messages(new_messages)
-        return state.last_usage_tokens + new_estimate
-
-    return _rough_estimate_messages(history.messages)
-
-
-def _rough_estimate_messages(messages: list) -> int:
-    """Estimate token count for a list of messages using UTF-8 byte length."""
-    total = 0
-    for msg in messages:
-        if isinstance(msg.content, str):
-            total += config.estimate_tokens(msg.content)
-        elif isinstance(msg.content, list):
-            for block in msg.content:
-                text = getattr(block, "text", None) or getattr(block, "content", None) or ""
-                if isinstance(text, str):
-                    total += config.estimate_tokens(text)
-    return total
 
 
 def should_auto_compact(estimated_tokens: int) -> bool:
@@ -74,12 +43,6 @@ def is_at_blocking_limit(estimated_tokens: int) -> bool:
     return estimated_tokens >= config.MAX_CONTEXT_WINDOW - BLOCKING_LIMIT_BUFFER_TOKENS
 
 
-def _is_prompt_too_long(error: Exception) -> bool:
-    """Detect prompt_too_long errors from side_query."""
-    msg = str(error).lower()
-    return "prompt is too long" in msg or "prompt_too_long" in msg
-
-
 def _messages_to_prepared(messages: list[Message]) -> list[Message]:
     """Expand attachments + merge same-role, reusing MessageHistory's logic."""
     return MessageHistory(messages=messages).prepare_messages()
@@ -88,10 +51,49 @@ def _messages_to_prepared(messages: list[Message]) -> list[Message]:
 async def auto_compact(history: MessageHistory) -> bool:
     """Full compact with truncate-head retry on prompt_too_long.
 
+    Uses the main model with thinking enabled (matching Claude Code's
+    forked-agent compaction path). Falls back to main model without
+    thinking on failure.
+
     If the compaction side_query itself gets prompt_too_long, drops the
     oldest 20% of message groups and retries (up to MAX_PTL_RETRIES times).
 
     Returns True if compaction was performed, False otherwise.
+    """
+    thinking = config.THINKING_ENABLED
+    # When thinking is on, max_tokens must cover both thinking budget and output
+    max_tokens = (
+        config.THINKING_BUDGET_TOKENS + config.AUTO_COMPACT_MAX_TOKENS
+        if thinking else config.AUTO_COMPACT_MAX_TOKENS
+    )
+
+    # Primary path: main model + thinking
+    result = await _try_compact(history, thinking=thinking, max_tokens=max_tokens)
+    if result is not None:
+        return result
+
+    # Fallback: main model, no thinking (matches Claude Code's streaming fallback)
+    if thinking:
+        logger.info("Auto compact: retrying without thinking")
+        result = await _try_compact(
+            history, thinking=False, max_tokens=config.AUTO_COMPACT_MAX_TOKENS,
+        )
+        if result is not None:
+            return result
+
+    return False
+
+
+async def _try_compact(
+    history: MessageHistory,
+    *,
+    thinking: bool,
+    max_tokens: int,
+) -> bool | None:
+    """Single compact attempt with PTL retry loop.
+
+    Returns True on success, False on unrecoverable failure,
+    None if the caller should try a different strategy (fallback).
     """
     prepared = history.prepare_messages()
     if not prepared:
@@ -102,13 +104,14 @@ async def auto_compact(history: MessageHistory) -> bool:
     for attempt in range(MAX_PTL_RETRIES + 1):
         try:
             response = await side_query(
-                model=config.MEMORY_SIDE_QUERY_MODEL,
+                model=config.MODEL,
                 system=get_compact_prompt(),
                 messages=prepared,
-                max_tokens=config.AUTO_COMPACT_MAX_TOKENS,
+                max_tokens=max_tokens,
+                thinking=thinking,
             )
         except Exception as e:
-            if _is_prompt_too_long(e) and attempt < MAX_PTL_RETRIES:
+            if is_prompt_too_long(e) and attempt < MAX_PTL_RETRIES:
                 truncated = truncate_head(source_messages)
                 if truncated is None:
                     logger.warning("Auto compact: cannot truncate further, giving up")
@@ -120,12 +123,13 @@ async def auto_compact(history: MessageHistory) -> bool:
                     len(source_messages), attempt + 1, MAX_PTL_RETRIES,
                 )
                 continue
+
             logger.warning("Auto compact: side_query failed: %s", e)
-            return False
+            return None  # signal caller to try fallback
 
         if not response or not response.content:
             logger.warning("Auto compact: LLM returned empty response")
-            return False
+            return None
 
         raw_text = ""
         for block in response.content:
@@ -134,7 +138,7 @@ async def auto_compact(history: MessageHistory) -> bool:
 
         if not raw_text.strip():
             logger.warning("Auto compact: LLM returned no text content")
-            return False
+            return None
 
         summary_text = get_compact_user_summary(raw_text, suppress_follow_up=True)
         history.replace_with_summary(summary_text)
@@ -142,4 +146,4 @@ async def auto_compact(history: MessageHistory) -> bool:
         logger.info("Auto compact: replaced %d messages with summary", len(prepared))
         return True
 
-    return False
+    return None

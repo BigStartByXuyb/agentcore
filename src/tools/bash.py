@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import locale
 import shutil
 import re
 
@@ -43,6 +44,16 @@ _HAS_BASH = _BASH_PATH is not None
 
 DEFAULT_TIMEOUT_MS = 120_000
 
+_FALLBACK_ENCODING = locale.getpreferredencoding(False)
+
+
+def _decode_output(data: bytes) -> str:
+    """Decode subprocess output: try UTF-8 first, fall back to system encoding."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(_FALLBACK_ENCODING, errors="replace")
+
 
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     command: str = inputs["command"]
@@ -82,8 +93,8 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             })
 
         return ToolResult(data={
-            "stdout": stdout_bytes.decode("utf-8", errors="replace"),
-            "stderr": stderr_bytes.decode("utf-8", errors="replace"),
+            "stdout": _decode_output(stdout_bytes),
+            "stderr": _decode_output(stderr_bytes),
             "exit_code": proc.returncode,
             "interrupted": False,
         })

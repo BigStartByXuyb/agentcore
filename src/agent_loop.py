@@ -423,12 +423,23 @@ async def run_agent_loop(
 
         # --- Execute tools: stream vs non-stream ---
         try:
-            if stream and streaming_executor is not None and streaming_executor.has_tools():
-                tool_use_context = _apply_tool_results(
-                    streaming_executor.collect_results(),
-                    assistant_content, history, tool_use_context,
-                )
-                tool_names_used = [t.name for t in streaming_executor._tools]
+            if stream and streaming_executor is not None:
+                if streaming_executor.has_tools():
+                    tool_use_context = _apply_tool_results(
+                        streaming_executor.collect_results(),
+                        assistant_content, history, tool_use_context,
+                    )
+                    tool_names_used = [t.name for t in streaming_executor._tools]
+                else:
+                    # Stream finished with no tools — text already displayed
+                    # via TextDelta/ThinkingDelta, just emit usage and return.
+                    on_event(TokenUsage(
+                        label=label,
+                        input_tokens=_state.total_input_tokens,
+                        output_tokens=_state.total_output_tokens,
+                        thinking_tokens=_state.total_thinking_tokens,
+                    ))
+                    return extract_text(response.content)
             else:
                 result = await _process_nonstream_tools(
                     response, assistant_content, history, tool_use_context,

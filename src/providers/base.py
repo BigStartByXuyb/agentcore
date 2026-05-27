@@ -5,15 +5,11 @@ The api.py dispatcher + agent_loop only see this shape; they don't know
 which backend is actually responding.
 
 Design contract (async):
-  - create_message()   → awaitable, returns ProviderMessage (or duck-typed
-                         equivalent like anthropic.types.Message).
-                         Pass tools=[] for non-tool-using calls (e.g.
-                         compact, memory recall).
-  - stream_message()   → returns an *async* context manager yielding a
-                         ProviderStream (see stream.py).
-
-The duck-typing contract means agent_loop never needs provider-specific
-branches. Anthropic's native Message already matches ProviderMessage shape.
+  - create_message()  → awaitable, returns ProviderMessage. No retry —
+                        retry is handled by api.py via with_retry.
+  - open_stream()     → awaitable, returns a ProviderStream. No retry.
+  - Error classification attributes (is_retryable, extract_retry_after,
+    connection_error_types, label) used by api.py's with_retry calls.
 
 Thinking parameter:
   Both methods accept `thinking: bool`. When True, each adapter
@@ -34,23 +30,14 @@ if TYPE_CHECKING:
     from src.core.config import ProviderModels
     from src.core.types import Message
 
-# Signature: (delay_seconds, attempt, max_attempts)
-RetryCallback = Callable[[float, int, int], None]
-
-
-class ProviderStreamCM(Protocol):
-    """Async context manager that yields a ProviderStream on enter.
-
-    All adapters' stream_message() return an object satisfying this Protocol.
-    Concrete implementations: _AsyncStreamWithRetry (Anthropic), _DeepSeekStreamWithRetry (DeepSeek).
-    """
-
-    async def __aenter__(self) -> ProviderStream: ...
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None: ...
-
 
 class ProviderAdapter(Protocol):
     """Unified interface implemented by every provider backend."""
+
+    is_retryable: Callable[[Exception], bool]
+    extract_retry_after: Callable[[Exception], float | None]
+    connection_error_types: tuple[type[Exception], ...]
+    label: str
 
     def get_default_models(self) -> ProviderModels:
         """Return the provider's default model tiers."""
@@ -65,14 +52,12 @@ class ProviderAdapter(Protocol):
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = 3,
-        on_retry: RetryCallback | None = None,
         output_format: dict | None = None,
     ) -> ProviderMessage:
-        """Non-streaming message creation."""
+        """Non-streaming message creation. No retry — api.py handles that."""
         ...
 
-    def stream_message(
+    async def open_stream(
         self,
         *,
         messages: list[Message],
@@ -81,8 +66,6 @@ class ProviderAdapter(Protocol):
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = 3,
-        on_retry: RetryCallback | None = None,
-    ) -> ProviderStreamCM:
-        """Streaming message creation."""
+    ) -> ProviderStream:
+        """Open a streaming connection, returning a ProviderStream. No retry."""
         ...

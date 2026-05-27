@@ -1,51 +1,35 @@
 """API dispatcher — routes calls to the active provider adapter (async).
 
-Historically this file contained the Anthropic client + retry logic
-directly.  Phase-0 of the multi-provider refactor moved that code into
-src/providers/anthropic/adapter.py, and this module is now a **thin
-shim** that preserves the public surface so existing callers
-(agent_loop.py, memory/recall.py, tests) keep working unchanged.
-
-All real work is done by the adapter returned by
-`get_provider(config.PROVIDER)` — see src/providers/__init__.py for the
-registry.
-
 Public surface (async):
-  - query_model(...)              → await adapter.create_message(...)
-  - create_stream_with_retry(...) → adapter.stream_message(...)   (returns
-                                    an async context manager — caller uses
-                                    `async with ... as stream:`)
+  - query_model_stream(...)  → unified async generator (RetryEvent + StreamEvent + ProviderMessage)
+  - query_model(...)         → non-streaming convenience wrapper (side queries)
   - get_client() / reset_client() → AsyncAnthropic client singleton access
-                                    (kept for callers that still reach
-                                    into the raw SDK; other providers
-                                    won't expose a client here).
+
+Corresponds to Claude Code's src/services/api/claude.ts:
+  query_model_stream  ≈ queryModelWithStreaming
+  query_model         ≈ queryModelWithoutStreaming
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, AsyncGenerator, Union
 
 from src.core import config
 from src.providers import get_provider
-from src.providers.base import ProviderStreamCM
+from src.providers.stream import StreamEvent
 from src.providers.types import ProviderMessage
-
-if TYPE_CHECKING:
-    from src.core.types import Message
-
-# Retry callback signature — (delay_seconds, attempt, max_attempts) -> None
-_RetryCb = Callable[[float, int, int], None]
-
-
-# ---------------------------------------------------------------------------
-# Retry constants — re-exported so existing imports keep working.
-# (Callers reference api.DEFAULT_MAX_RETRIES etc. via tests and docs.)
-# ---------------------------------------------------------------------------
-from src.providers.anthropic.adapter import (  # noqa: E402
+from src.providers.retry import (
+    with_retry,
+    RetryEvent,
     DEFAULT_MAX_RETRIES,
     BASE_DELAY_MS,
     MAX_DELAY_MS,
 )
+
+if TYPE_CHECKING:
+    from src.core.types import Message
+
+StreamYield = Union[RetryEvent, StreamEvent, ProviderMessage]
 
 
 # ---------------------------------------------------------------------------
@@ -53,12 +37,7 @@ from src.providers.anthropic.adapter import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def get_client():
-    """Return the active AsyncAnthropic client.
-
-    Only meaningful when config.PROVIDER == 'anthropic'.  Other providers
-    don't expose a raw anthropic.AsyncAnthropic object.  Retained because
-    some tests and legacy call sites reach directly into the SDK.
-    """
+    """Return the active AsyncAnthropic client."""
     from src.providers.anthropic import get_default_adapter as _get_anthropic_adapter
     return _get_anthropic_adapter().get_client()
 
@@ -70,7 +49,73 @@ def reset_client() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dispatchers — forward to the active provider adapter
+# Unified streaming entry — agent loop uses this
+# ---------------------------------------------------------------------------
+
+async def query_model_stream(
+    *,
+    messages: list[Message],
+    system: str,
+    tools: list[dict],
+    model: str | None = None,
+    max_tokens: int | None = None,
+    thinking: bool = False,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> AsyncGenerator[StreamYield, None]:
+    """Unified streaming entry point.
+
+    Two phases, matching Claude Code's queryModel pattern:
+
+    Phase 1 — with_retry establishes the connection:
+      yields RetryEvent for each retry attempt (real-time notification)
+      yields the ProviderStream object on success
+
+    Phase 2 — iterate the stream:
+      yields StreamEvent (text/thinking deltas, content_block_stop with block)
+      yields ProviderMessage as the final item (complete response)
+    """
+    adapter = get_provider(config.PROVIDER)
+
+    # Phase 1: establish connection with retry
+    api_stream = None
+    async for item in with_retry(
+        lambda: adapter.open_stream(
+            messages=messages, system=system, tools=tools,
+            model=model, max_tokens=max_tokens, thinking=thinking,
+        ),
+        is_retryable=adapter.is_retryable,
+        extract_retry_after=adapter.extract_retry_after,
+        connection_error_types=adapter.connection_error_types,
+        max_retries=max_retries,
+        label=adapter.label,
+    ):
+        if isinstance(item, RetryEvent):
+            yield item
+        else:
+            api_stream = item
+
+    assert api_stream is not None
+
+    # Phase 2: iterate the stream
+    try:
+        async for event in api_stream:
+            if event.type == "content_block_stop":
+                snapshot = api_stream.current_message_snapshot
+                block = snapshot.content[event.index]
+                yield StreamEvent(
+                    type="content_block_stop",
+                    index=event.index,
+                    block=block,
+                )
+            else:
+                yield event
+        yield await api_stream.get_final_message()
+    finally:
+        await api_stream.close()
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming convenience — side queries (compact, recall)
 # ---------------------------------------------------------------------------
 
 async def query_model(
@@ -82,54 +127,27 @@ async def query_model(
     max_tokens: int | None = None,
     thinking: bool = False,
     max_retries: int = DEFAULT_MAX_RETRIES,
-    on_retry: _RetryCb | None = None,
     output_format: dict | None = None,
 ) -> ProviderMessage:
-    """Call the active provider's create_message (awaited)."""
+    """Non-streaming API call — for side queries that don't need streaming events."""
     adapter = get_provider(config.PROVIDER)
-    return await adapter.create_message(
-        messages=messages,
-        system=system,
-        tools=tools,
-        model=model,
-        max_tokens=max_tokens,
-        thinking=thinking,
+    result: ProviderMessage | None = None
+    async for item in with_retry(
+        lambda: adapter.create_message(
+            messages=messages, system=system, tools=tools,
+            model=model, max_tokens=max_tokens, thinking=thinking,
+            output_format=output_format,
+        ),
+        is_retryable=adapter.is_retryable,
+        extract_retry_after=adapter.extract_retry_after,
+        connection_error_types=adapter.connection_error_types,
         max_retries=max_retries,
-        on_retry=on_retry,
-        output_format=output_format,
-    )
-
-
-def create_stream_with_retry(
-    *,
-    messages: list[Message],
-    system: str,
-    tools: list[dict],
-    model: str | None = None,
-    max_tokens: int | None = None,
-    thinking: bool = False,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-    on_retry: _RetryCb | None = None,
-) -> ProviderStreamCM:
-    """Call the active provider's stream_message.
-
-    Returns an *async* context manager.  Use:
-        async with create_stream_with_retry(...) as stream:
-            async for text in stream.text_stream:
-                ...
-            final = await stream.get_final_message()
-    """
-    adapter = get_provider(config.PROVIDER)
-    return adapter.stream_message(
-        messages=messages,
-        system=system,
-        tools=tools,
-        model=model,
-        max_tokens=max_tokens,
-        thinking=thinking,
-        max_retries=max_retries,
-        on_retry=on_retry,
-    )
+        label=adapter.label,
+    ):
+        if not isinstance(item, RetryEvent):
+            result = item
+    assert result is not None
+    return result
 
 
 __all__ = [
@@ -138,6 +156,6 @@ __all__ = [
     "MAX_DELAY_MS",
     "get_client",
     "reset_client",
+    "query_model_stream",
     "query_model",
-    "create_stream_with_retry",
 ]

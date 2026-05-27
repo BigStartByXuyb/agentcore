@@ -171,7 +171,6 @@ async def run_memory_extraction(
             tool_use_context=tool_use_context,
             max_turns=5,
             label="memory-extraction",
-            stream=False,
             on_event=cb,
         )
     except Exception as e:

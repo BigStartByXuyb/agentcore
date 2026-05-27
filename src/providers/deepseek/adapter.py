@@ -2,19 +2,17 @@
 
 Implements the ProviderAdapter Protocol using the openai Python SDK pointed
 at DeepSeek's API endpoint.  Handles:
-  - Non-streaming (create_message) with retry
-  - Streaming (stream_message) with retry on connection
-  - Side query (no tools, no streaming)
+  - Non-streaming (create_message) — single API call
+  - Streaming (open_stream) — opens connection, returns ProviderStream
   - reasoning_content → ThinkingBlock mapping (DeepSeek-R1)
 
+No retry logic — that's handled by api.py via with_retry.
 All format conversion is delegated to converter.py.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import random
 import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -23,7 +21,6 @@ if TYPE_CHECKING:
 
 from src.core import config
 from src.core.types import Message
-from src.providers.base import RetryCallback, ProviderStreamCM
 from src.providers.types import (
     ProviderMessage,
     TextBlock,
@@ -38,27 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Constants — same retry policy as Anthropic adapter
+# Error classification (used by api.py's with_retry)
 # ---------------------------------------------------------------------------
-DEFAULT_MAX_RETRIES = 3
-BASE_DELAY_MS = 500
-MAX_DELAY_MS = 32_000
-
-
-# ---------------------------------------------------------------------------
-# Retry helpers
-# ---------------------------------------------------------------------------
-
-def _get_retry_delay(attempt: int, retry_after: float | None = None) -> float:
-    if retry_after is not None:
-        return retry_after
-    base_delay_s = min(
-        (BASE_DELAY_MS / 1000) * (2 ** (attempt - 1)),
-        MAX_DELAY_MS / 1000,
-    )
-    jitter = random.random() * 0.25 * base_delay_s
-    return base_delay_s + jitter
-
 
 def _is_retryable_openai(error: Any) -> bool:
     from openai import APIError
@@ -94,8 +72,20 @@ def _extract_retry_after_openai(error: Any) -> float | None:
 class DeepSeekAdapter:
     """DeepSeek API adapter using the openai SDK."""
 
+    is_retryable = staticmethod(_is_retryable_openai)
+    extract_retry_after = staticmethod(_extract_retry_after_openai)
+    label = "DeepSeek"
+
     def __init__(self) -> None:
         self._client: Any = None  # openai.AsyncOpenAI
+        self._connection_error_types: tuple[type[Exception], ...] | None = None
+
+    @property
+    def connection_error_types(self) -> tuple[type[Exception], ...]:
+        if self._connection_error_types is None:
+            from openai import APIConnectionError
+            self._connection_error_types = (APIConnectionError,)
+        return self._connection_error_types
 
     # -- default models -----------------------------------------------------
 
@@ -133,12 +123,9 @@ class DeepSeekAdapter:
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        on_retry: RetryCallback | None = None,
         output_format: dict | None = None,
     ) -> ProviderMessage:
-        from openai import APIError, APIConnectionError
-
+        """Single API call — no retry (api.py handles that)."""
         client = self.get_client()
         default_model = config.DEEPSEEK_REASONER_MODEL if thinking else config.MODELS.main
         resolved_model = model or default_model
@@ -147,64 +134,22 @@ class DeepSeekAdapter:
         oai_messages = converter.messages_to_openai(messages, system)
         oai_tools = converter.tools_to_openai(tools) if tools else None
 
-        last_error: Exception | None = None
+        params: dict[str, Any] = dict(
+            model=resolved_model,
+            max_tokens=resolved_max_tokens,
+            messages=oai_messages,
+        )
+        if oai_tools:
+            params["tools"] = oai_tools
+        if output_format is not None:
+            params["response_format"] = output_format
 
-        for attempt in range(1, max_retries + 2):
-            try:
-                params: dict[str, Any] = dict(
-                    model=resolved_model,
-                    max_tokens=resolved_max_tokens,
-                    messages=oai_messages,
-                )
-                if oai_tools:
-                    params["tools"] = oai_tools
-                if output_format is not None:
-                    params["response_format"] = output_format
-                response = await client.chat.completions.create(**params)
-                return converter.response_to_provider(response)
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning(
-                    "DeepSeek connection error (attempt %d/%d): %s",
-                    attempt, max_retries + 1, e,
-                )
-
-            except APIError as e:
-                last_error = e
-                status = getattr(e, "status_code", None) or getattr(e, "status", None)
-                logger.warning(
-                    "DeepSeek API error %s (attempt %d/%d): %s",
-                    status, attempt, max_retries + 1, e,
-                )
-                if not _is_retryable_openai(e):
-                    raise
-
-            except Exception:
-                raise
-
-            if attempt > max_retries:
-                break
-
-            retry_after = None
-            if isinstance(last_error, APIError):
-                retry_after = _extract_retry_after_openai(last_error)
-
-            delay = _get_retry_delay(attempt, retry_after)
-            logger.info(
-                "DeepSeek retrying in %.1fs (attempt %d/%d)...",
-                delay, attempt, max_retries + 1,
-            )
-            if on_retry is not None:
-                on_retry(delay, attempt, max_retries + 1)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
+        response = await client.chat.completions.create(**params)
+        return converter.response_to_provider(response)
 
     # -- streaming ----------------------------------------------------------
 
-    def stream_message(
+    async def open_stream(
         self,
         *,
         messages: list[Message],
@@ -213,21 +158,29 @@ class DeepSeekAdapter:
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        on_retry: RetryCallback | None = None,
-    ) -> ProviderStreamCM:
+    ) -> _DeepSeekStream:
+        """Open a streaming connection — no retry (api.py handles that)."""
         if thinking and model is None:
             model = config.DEEPSEEK_REASONER_MODEL
-        return _DeepSeekStreamWithRetry(
-            adapter=self,
-            messages=messages,
-            system=system,
-            tools=tools,
-            model=model,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            on_retry=on_retry,
+
+        client = self.get_client()
+        resolved_model = model or config.MODELS.main
+        resolved_max_tokens = max_tokens or config.MAX_TOKENS
+
+        oai_messages = converter.messages_to_openai(messages, system)
+        oai_tools = converter.tools_to_openai(tools) if tools else None
+
+        params: dict[str, Any] = dict(
+            model=resolved_model,
+            max_tokens=resolved_max_tokens,
+            messages=oai_messages,
+            stream=True,
         )
+        if oai_tools:
+            params["tools"] = oai_tools
+
+        raw_stream = await client.chat.completions.create(**params)
+        return _DeepSeekStream(raw_stream)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +194,7 @@ class _DeepSeekStream:
         self._raw = raw_stream
         self._text_parts: list[str] = []
         self._reasoning_parts: list[str] = []
-        self._tool_calls: dict[int, dict] = {}  # index → accumulated tool call
+        self._tool_calls: dict[int, dict] = {}
         self._finish_reason: str | None = None
         self._usage: Usage = Usage()
         self._final_snapshot: ProviderMessage | None = None
@@ -308,6 +261,10 @@ class _DeepSeekStream:
             return self._final_snapshot
         return self._build_message()
 
+    async def close(self) -> None:
+        if self._raw is not None:
+            await self._raw.close()
+
     def _build_message(self) -> ProviderMessage:
         blocks: list = []
 
@@ -340,97 +297,3 @@ class _DeepSeekStream:
             stop_reason=stop_reason,
             usage=self._usage,
         )
-
-
-class _DeepSeekStreamWithRetry:
-    """Async context manager that retries stream creation, then wraps in _DeepSeekStream."""
-
-    def __init__(
-        self,
-        *,
-        adapter: DeepSeekAdapter,
-        messages: list[Message],
-        system: str,
-        tools: list[dict],
-        model: str | None,
-        max_tokens: int | None,
-        max_retries: int,
-        on_retry: RetryCallback | None,
-    ) -> None:
-        self._adapter = adapter
-        self._messages = messages
-        self._system = system
-        self._tools = tools
-        self._model = model
-        self._max_tokens = max_tokens
-        self._max_retries = max_retries
-        self._on_retry = on_retry
-        self._raw_stream: Any = None
-        self._stream: _DeepSeekStream | None = None
-
-    async def __aenter__(self) -> _DeepSeekStream:
-        from openai import APIError, APIConnectionError
-
-        client = self._adapter.get_client()
-        resolved_model = self._model or config.MODELS.main
-        resolved_max_tokens = self._max_tokens or config.MAX_TOKENS
-
-        oai_messages = converter.messages_to_openai(self._messages, self._system)
-        oai_tools = converter.tools_to_openai(self._tools) if self._tools else None
-
-        last_error: Exception | None = None
-
-        for attempt in range(1, self._max_retries + 2):
-            try:
-                params: dict[str, Any] = dict(
-                    model=resolved_model,
-                    max_tokens=resolved_max_tokens,
-                    messages=oai_messages,
-                    stream=True,
-                )
-                if oai_tools:
-                    params["tools"] = oai_tools
-                self._raw_stream = await client.chat.completions.create(**params)
-                self._stream = _DeepSeekStream(self._raw_stream)
-                return self._stream
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning(
-                    "DeepSeek stream connection error (attempt %d/%d): %s",
-                    attempt, self._max_retries + 1, e,
-                )
-
-            except APIError as e:
-                last_error = e
-                status = getattr(e, "status_code", None) or getattr(e, "status", None)
-                logger.warning(
-                    "DeepSeek stream API error %s (attempt %d/%d): %s",
-                    status, attempt, self._max_retries + 1, e,
-                )
-                if not _is_retryable_openai(e):
-                    raise
-
-            if attempt > self._max_retries:
-                break
-
-            retry_after = None
-            if isinstance(last_error, APIError):
-                retry_after = _extract_retry_after_openai(last_error)
-
-            delay = _get_retry_delay(attempt, retry_after)
-            logger.info(
-                "DeepSeek stream retrying in %.1fs (attempt %d/%d)...",
-                delay, attempt, self._max_retries + 1,
-            )
-            if self._on_retry is not None:
-                self._on_retry(delay, attempt, self._max_retries + 1)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        if self._raw_stream is not None:
-            await self._raw_stream.close()
-        return False

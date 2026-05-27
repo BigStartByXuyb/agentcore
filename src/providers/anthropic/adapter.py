@@ -2,32 +2,21 @@
 
 Corresponds to Claude Code's:
   - src/services/api/client.ts    → getAnthropicClient()
-  - src/services/api/withRetry.ts → withRetry() retry logic
-  - src/services/api/claude.ts    → queryModel() / queryModelWithoutStreaming()
+  - src/services/api/claude.ts    → queryModel()
 
-This is the **passthrough adapter** — we use anthropic SDK directly and
-no message/tool format conversion is needed. Future providers (OpenAI-compat,
-Google, ...) will sit next to this in sibling packages and do the translation.
+This is the native adapter — uses anthropic SDK directly with minimal
+format conversion (handled by converter.py). Future providers (OpenAI-compat,
+Google, ...) sit in sibling packages with their own converters.
 
-Retry behaviour:
-  - Exponential back-off with jitter on 429 / 529 / 5xx / connection errors
-  - Respects retry-after header when present
-  - Non-retryable errors (400 bad request, 401 auth) are raised immediately
-
-Async model:
-  - create_message: `await adapter.create_message(...)`
-  - stream_message: returns an async context manager.  Use
-      `async with adapter.stream_message(...) as stream:
-           async for text in stream.text_stream: ...
-           final = await stream.get_final_message()`
-    Retry is handled internally on `__aenter__` so the user just awaits
-    entering the context.
+Adapter responsibility:
+  - create_message: single API call, returns ProviderMessage
+  - open_stream: opens streaming connection, returns ProviderStream
+  - Error classification attributes for api.py's with_retry
+  No retry logic — that's handled by api.py via with_retry.
 """
 
 from __future__ import annotations
 
-import asyncio
-import random
 import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -35,63 +24,22 @@ import anthropic
 
 if TYPE_CHECKING:
     from src.core.config import ProviderModels
-from anthropic import APIError, APIConnectionError
+from anthropic import APIConnectionError
 
 from src.core import config
-from src.providers.base import RetryCallback, ProviderStreamCM
-from src.providers.types import (
-    ProviderMessage,
-    TextBlock,
-    ToolUseBlock,
-    ThinkingBlock,
-    RedactedThinkingBlock,
-    Usage,
-)
+from src.providers.types import ProviderMessage
 from src.providers.stream import StreamEvent
-from src.core.types import (
-    Message,
-    ContentBlock,
-    TextContent,
-    ToolUseContent,
-    ToolResultContent,
-    ThinkingContent,
-    RedactedThinkingContent,
-    _content_block_to_dict,
-)
+from src.providers.anthropic import converter
+from src.core.types import Message
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Constants — match withRetry.ts
-# ---------------------------------------------------------------------------
-DEFAULT_MAX_RETRIES = 3
-BASE_DELAY_MS = 500
-MAX_DELAY_MS = 32_000
-
-
-# ---------------------------------------------------------------------------
-# Retry helpers (module-private; reused across the three entry points)
+# Error classification (used by api.py's with_retry)
 # ---------------------------------------------------------------------------
 
-def _get_retry_delay(attempt: int, retry_after: float | None = None) -> float:
-    """Exponential back-off with jitter + optional retry-after header.
-
-    Mirrors withRetry.ts getRetryDelay().
-    Returns delay in seconds.
-    """
-    if retry_after is not None:
-        return retry_after
-
-    base_delay_s = min(
-        (BASE_DELAY_MS / 1000) * (2 ** (attempt - 1)),
-        MAX_DELAY_MS / 1000,
-    )
-    jitter = random.random() * 0.25 * base_delay_s
-    return base_delay_s + jitter
-
-
-def _is_retryable(error: APIError) -> bool:
+def _is_retryable(error: Exception) -> bool:
     """Decide whether an API error warrants a retry."""
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
     if status is None:
@@ -105,7 +53,7 @@ def _is_retryable(error: APIError) -> bool:
     return False
 
 
-def _extract_retry_after(error: APIError) -> float | None:
+def _extract_retry_after(error: Exception) -> float | None:
     """Pull Retry-After header (seconds) from an API error, if present."""
     headers = getattr(error, "headers", None)
     if headers is None:
@@ -126,34 +74,11 @@ def _extract_retry_after(error: APIError) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Message format conversion: list[Message] → Anthropic API dicts
-# ---------------------------------------------------------------------------
-
-def _messages_to_anthropic(messages: list[Message]) -> list[dict]:
-    """Convert prepared Message objects to Anthropic API format.
-
-    Each Message's content (str or list[ContentBlock]) is converted to
-    the plain dict format the Anthropic SDK expects.
-    """
-    result: list[dict] = []
-    for msg in messages:
-        if isinstance(msg.content, str):
-            api_content: str | list[dict] = msg.content
-        else:
-            api_content = [_content_block_to_dict(b) for b in msg.content]
-        result.append({"role": msg.role, "content": api_content})
-    return result
-
-
-# ---------------------------------------------------------------------------
 # AnthropicAdapter — implements ProviderAdapter Protocol
 # ---------------------------------------------------------------------------
 
 def _build_thinking_dict(max_tokens: int) -> dict | None:
-    """Build Anthropic-specific thinking param from config, or None if disabled.
-
-    budget_tokens must be < max_tokens (API constraint).
-    """
+    """Build Anthropic-specific thinking param from config, or None if disabled."""
     if not config.THINKING_ENABLED:
         return None
     budget = min(config.THINKING_BUDGET_TOKENS, max_tokens - 1)
@@ -163,11 +88,12 @@ def _build_thinking_dict(max_tokens: int) -> dict | None:
 
 
 class AnthropicAdapter:
-    """Native Claude API adapter (passthrough, no format translation).
+    """Native Claude API adapter (passthrough, no format translation)."""
 
-    Owns its own anthropic.AsyncAnthropic client singleton so multiple
-    providers can coexist without stepping on each other.
-    """
+    is_retryable = staticmethod(_is_retryable)
+    extract_retry_after = staticmethod(_extract_retry_after)
+    connection_error_types = (APIConnectionError,)
+    label = "Anthropic"
 
     def __init__(self) -> None:
         self._client: anthropic.AsyncAnthropic | None = None
@@ -187,11 +113,6 @@ class AnthropicAdapter:
     # -- client lifecycle ---------------------------------------------------
 
     def get_client(self) -> anthropic.AsyncAnthropic:
-        """Return a reusable AsyncAnthropic client, creating it on first call.
-
-        We set max_retries=0 because we handle retries ourselves (matching
-        Claude Code's pattern).
-        """
         if self._client is None:
             self._client = anthropic.AsyncAnthropic(
                 api_key=config.ANTHROPIC_AUTH_TOKEN,
@@ -201,7 +122,6 @@ class AnthropicAdapter:
         return self._client
 
     def reset_client(self) -> None:
-        """Force re-creation on next call (e.g. after auth refresh)."""
         self._client = None
 
     # -- non-streaming ------------------------------------------------------
@@ -215,79 +135,34 @@ class AnthropicAdapter:
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        on_retry: RetryCallback | None = None,
         output_format: dict | None = None,
     ) -> ProviderMessage:
-        """Call messages.create() with retry and error handling."""
+        """Single API call — no retry (api.py handles that)."""
         client = self.get_client()
         resolved_model = model or config.MODELS.main
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
-        api_messages = _messages_to_anthropic(messages)
+        api_messages = converter.messages_to_anthropic(messages)
 
         thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None
 
-        last_error: Exception | None = None
+        params: dict[str, Any] = dict(
+            model=resolved_model,
+            max_tokens=resolved_max_tokens,
+            system=system,
+            tools=tools,
+            messages=api_messages,
+        )
+        if thinking_dict is not None:
+            params["thinking"] = thinking_dict
+        if output_format is not None:
+            params["response_format"] = output_format
 
-        for attempt in range(1, max_retries + 2):  # +2: attempt 1 is initial try
-            try:
-                params: dict[str, Any] = dict(
-                    model=resolved_model,
-                    max_tokens=resolved_max_tokens,
-                    system=system,
-                    tools=tools,
-                    messages=api_messages,
-                )
-                if thinking_dict is not None:
-                    params["thinking"] = thinking_dict
-                if output_format is not None:
-                    params["response_format"] = output_format
-                response = await client.messages.create(**params)
-                return _sdk_message_to_provider(response)
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning(
-                    "API connection error (attempt %d/%d): %s",
-                    attempt, max_retries + 1, e,
-                )
-
-            except APIError as e:
-                last_error = e
-                status = getattr(e, "status_code", None) or getattr(e, "status", None)
-                logger.warning(
-                    "API error %s (attempt %d/%d): %s",
-                    status, attempt, max_retries + 1, e,
-                )
-                if not _is_retryable(e):
-                    raise
-
-            except Exception:
-                raise
-
-            # --- Should we retry? ---
-            if attempt > max_retries:
-                break
-
-            retry_after = None
-            if isinstance(last_error, APIError):
-                retry_after = _extract_retry_after(last_error)
-
-            delay = _get_retry_delay(attempt, retry_after)
-            logger.info(
-                "Retrying in %.1fs (attempt %d/%d)...",
-                delay, attempt, max_retries + 1,
-            )
-            if on_retry is not None:
-                on_retry(delay, attempt, max_retries + 1)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
+        response = await client.messages.create(**params)
+        return converter.response_to_provider(response)
 
     # -- streaming ----------------------------------------------------------
 
-    def stream_message(
+    async def open_stream(
         self,
         *,
         messages: list[Message],
@@ -296,14 +171,12 @@ class AnthropicAdapter:
         model: str | None = None,
         max_tokens: int | None = None,
         thinking: bool = False,
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        on_retry: RetryCallback | None = None,
-    ) -> ProviderStreamCM:
-        """Create a streaming API call with retry, returning an *async* stream CM."""
+    ) -> _AnthropicStream:
+        """Open a streaming connection — no retry (api.py handles that)."""
         client = self.get_client()
         resolved_model = model or config.MODELS.main
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
-        api_messages = _messages_to_anthropic(messages)
+        api_messages = converter.messages_to_anthropic(messages)
 
         thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None
 
@@ -317,47 +190,21 @@ class AnthropicAdapter:
         if thinking_dict is not None:
             params["thinking"] = thinking_dict
 
-        return _AsyncStreamWithRetry(
-            client=client,
-            params=params,
-            max_retries=max_retries,
-            on_retry=on_retry,
-        )
+        cm = client.messages.stream(**params)
+        raw_stream = await cm.__aenter__()
+        return _AnthropicStream(raw_stream, cm)
 
 
 # ---------------------------------------------------------------------------
 # _AnthropicStream — wraps SDK stream, yields StreamEvent + ProviderMessage
 # ---------------------------------------------------------------------------
 
-def _sdk_message_to_provider(msg: Any) -> ProviderMessage:
-    """Convert an anthropic.types.Message to ProviderMessage."""
-    blocks: list = []
-    for block in msg.content:
-        if block.type == "text":
-            blocks.append(TextBlock(text=block.text))
-        elif block.type == "tool_use":
-            blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
-        elif block.type == "thinking":
-            blocks.append(ThinkingBlock(thinking=block.thinking, signature=block.signature))
-        elif block.type == "redacted_thinking":
-            blocks.append(RedactedThinkingBlock(data=block.data))
-    return ProviderMessage(
-        content=blocks,
-        stop_reason=msg.stop_reason or "end_turn",
-        usage=Usage(
-            input_tokens=msg.usage.input_tokens,
-            output_tokens=msg.usage.output_tokens,
-            cache_creation_input_tokens=getattr(msg.usage, "cache_creation_input_tokens", 0) or 0,
-            cache_read_input_tokens=getattr(msg.usage, "cache_read_input_tokens", 0) or 0,
-        ),
-    )
-
-
 class _AnthropicStream:
     """Wraps Anthropic SDK's AsyncMessageStream, converting events to StreamEvent."""
 
-    def __init__(self, raw_stream: Any) -> None:
+    def __init__(self, raw_stream: Any, context_manager: Any = None) -> None:
         self._raw = raw_stream
+        self._cm = context_manager
 
     def __aiter__(self) -> AsyncIterator[StreamEvent]:
         return self._iterate()
@@ -375,82 +222,12 @@ class _AnthropicStream:
 
     @property
     def current_message_snapshot(self) -> ProviderMessage:
-        return _sdk_message_to_provider(self._raw.current_message_snapshot)
+        return converter.response_to_provider(self._raw.current_message_snapshot)
 
     async def get_final_message(self) -> ProviderMessage:
         raw = await self._raw.get_final_message()
-        return _sdk_message_to_provider(raw)
+        return converter.response_to_provider(raw)
 
-
-# ---------------------------------------------------------------------------
-# _AsyncStreamWithRetry — async context manager wrapping stream creation
-# ---------------------------------------------------------------------------
-
-class _AsyncStreamWithRetry:
-    """Async CM that retries stream open, then proxies to the live stream."""
-
-    def __init__(
-        self,
-        *,
-        client: anthropic.AsyncAnthropic,
-        params: dict,
-        max_retries: int,
-        on_retry: RetryCallback | None,
-    ) -> None:
-        self._client = client
-        self._params = params
-        self._max_retries = max_retries
-        self._on_retry = on_retry
-        self._inner_cm = None
-        self._stream = None
-
-    async def __aenter__(self):
-        last_error: Exception | None = None
-        for attempt in range(1, self._max_retries + 2):
-            try:
-                cm = self._client.messages.stream(**self._params)
-                raw_stream = await cm.__aenter__()
-                self._inner_cm = cm
-                self._stream = _AnthropicStream(raw_stream)
-                return self._stream
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning(
-                    "API connection error (attempt %d/%d): %s",
-                    attempt, self._max_retries + 1, e,
-                )
-
-            except APIError as e:
-                last_error = e
-                status = getattr(e, "status_code", None) or getattr(e, "status", None)
-                logger.warning(
-                    "API error %s (attempt %d/%d): %s",
-                    status, attempt, self._max_retries + 1, e,
-                )
-                if not _is_retryable(e):
-                    raise
-
-            if attempt > self._max_retries:
-                break
-
-            retry_after = None
-            if isinstance(last_error, APIError):
-                retry_after = _extract_retry_after(last_error)
-
-            delay = _get_retry_delay(attempt, retry_after)
-            logger.info(
-                "Retrying in %.1fs (attempt %d/%d)...",
-                delay, attempt, self._max_retries + 1,
-            )
-            if self._on_retry is not None:
-                self._on_retry(delay, attempt, self._max_retries + 1)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
-
-    async def __aexit__(self, exc_type, exc, tb):
-        if self._inner_cm is not None:
-            return await self._inner_cm.__aexit__(exc_type, exc, tb)
-        return False
+    async def close(self) -> None:
+        if self._cm is not None:
+            await self._cm.__aexit__(None, None, None)

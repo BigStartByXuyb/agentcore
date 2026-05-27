@@ -381,17 +381,22 @@ class TestRecoverOrphanToolResults:
 
 class TestAgentLoopApiErrorRecovery:
     def test_api_error_injects_synthetic_message(self):
-        """When query_model raises, agent_loop injects a synthetic error
+        """When query_model_stream raises, agent_loop injects a synthetic error
         message and continues the loop until max_turns."""
         import asyncio
-        from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
         from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
 
-        mock_query = AsyncMock(side_effect=APIConnectionError(request=MagicMock()))
+        call_count = 0
+
+        async def mock_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise APIConnectionError(request=MagicMock())
+            yield  # make it an async generator # noqa: E501
 
         history = MessageHistory([Message(role="user", content="hello")])
-        with patch("src.agent_loop.query_model", mock_query):
+        with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
                 system_prompt="test",
                 tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
@@ -401,7 +406,7 @@ class TestAgentLoopApiErrorRecovery:
             ))
 
         assert "max turns" in result.lower()
-        assert mock_query.call_count >= 1
+        assert call_count >= 1
         assert len(history.messages) > 1
         error_msgs = [m for m in history.messages if m.role == "assistant"]
         assert len(error_msgs) > 0
@@ -410,14 +415,19 @@ class TestAgentLoopApiErrorRecovery:
         """API errors are handled gracefully — loop reaches max_turns
         without crashing."""
         import asyncio
-        from unittest.mock import AsyncMock
         from src.agent_loop import run_agent_loop
         from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
 
-        mock_query = AsyncMock(side_effect=Exception("unexpected boom"))
+        call_count = 0
+
+        async def mock_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise Exception("unexpected boom")
+            yield  # make it an async generator # noqa: E501
 
         history = MessageHistory([Message(role="user", content="test")])
-        with patch("src.agent_loop.query_model", mock_query):
+        with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
                 system_prompt="test",
                 tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
@@ -426,5 +436,5 @@ class TestAgentLoopApiErrorRecovery:
                 on_event=lambda _: None,
             ))
 
-        assert mock_query.call_count >= 1
+        assert call_count >= 1
         assert "max turns" in result.lower()

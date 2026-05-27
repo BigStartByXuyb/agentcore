@@ -26,18 +26,18 @@ from src.providers.base import ProviderAdapter
 _PROVIDERS: dict[str, Callable[[], ProviderAdapter]] = {}
 
 
-def _register_anthropic() -> None:
-    from src.providers.anthropic import get_default_adapter as _anthropic_factory
-    _PROVIDERS["anthropic"] = _anthropic_factory
+def _lazy_anthropic() -> ProviderAdapter:
+    from src.providers.anthropic import get_default_adapter
+    return get_default_adapter()
 
 
-def _register_deepseek() -> None:
-    from src.providers.deepseek import get_default_adapter as _deepseek_factory
-    _PROVIDERS["deepseek"] = _deepseek_factory
+def _lazy_deepseek() -> ProviderAdapter:
+    from src.providers.deepseek import get_default_adapter
+    return get_default_adapter()
 
 
-_register_anthropic()
-_register_deepseek()
+_PROVIDERS["anthropic"] = _lazy_anthropic
+_PROVIDERS["deepseek"] = _lazy_deepseek
 
 
 def get_provider(name: str) -> ProviderAdapter:

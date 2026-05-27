@@ -338,27 +338,35 @@ class TestThinkingRecovery:
     """Test that run_agent_loop strips thinking blocks on thinking-related 400."""
 
     def test_thinking_400_triggers_strip_and_retry(self):
-        from unittest.mock import AsyncMock
         from anthropic import APIError
         from src.core.types import ToolUseContext, MessageHistory
+        from src.providers.stream import StreamEvent
+        from src.providers.types import ProviderMessage, TextBlock, Usage
         import asyncio
 
         err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
         err.status_code = 400
 
-        success_response = MagicMock()
-        success_response.usage.input_tokens = 100
-        success_response.usage.output_tokens = 50
-        success_response.usage.cache_creation_input_tokens = 0
-        success_response.stop_reason = "end_turn"
-        success_response.content = [types.SimpleNamespace(type="text", text="recovered")]
+        call_count = 0
 
-        mock_query = AsyncMock(side_effect=[err, success_response])
+        async def mock_stream(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise err
+                yield  # noqa: E501
+            else:
+                yield StreamEvent(type="text", text="recovered")
+                yield ProviderMessage(
+                    content=[TextBlock(text="recovered")],
+                    stop_reason="end_turn",
+                    usage=Usage(input_tokens=100, output_tokens=50),
+                )
 
         history = MessageHistory([Message(role="user", content="test")])
         ctx = ToolUseContext(messages=history, tools=["bash"])
 
-        with patch("src.agent_loop.query_model", mock_query):
+        with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
                 system_prompt="test",
                 tool_use_context=ctx,
@@ -367,10 +375,9 @@ class TestThinkingRecovery:
                 on_event=lambda _: None,
             ))
         assert result == "recovered"
-        assert mock_query.call_count == 2
+        assert call_count == 2
 
     def test_non_thinking_400_not_recovered(self):
-        from unittest.mock import AsyncMock
         from anthropic import APIError
         from src.core.types import ToolUseContext, MessageHistory
         import asyncio
@@ -378,12 +385,14 @@ class TestThinkingRecovery:
         err = APIError(message="malformed request", request=MagicMock(), body=None)
         err.status_code = 400
 
-        mock_query = AsyncMock(side_effect=err)
+        async def mock_stream(**kwargs):
+            raise err
+            yield  # noqa: E501
 
         history = MessageHistory([Message(role="user", content="test")])
         ctx = ToolUseContext(messages=history, tools=["bash"])
 
-        with patch("src.agent_loop.query_model", mock_query):
+        with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
                 system_prompt="test",
                 tool_use_context=ctx,

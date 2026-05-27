@@ -1,11 +1,11 @@
-"""Select relevant memories via a side LLM query.
+"""Select relevant memories via an LLM query.
 
 Corresponds to Claude Code's src/memdir/findRelevantMemories.ts.
 
 Flow:
   1. scan_memory_files() → get headers
   2. format_memory_manifest() → build text listing
-  3. side_query() with Haiku → select up to N relevant filenames
+  3. query_model(tools=[]) with Haiku → select up to N relevant filenames
   4. Parse JSON response → return matching MemoryHeader list
 """
 
@@ -16,7 +16,7 @@ import logging
 
 from src.core import config
 from src.core.types import MemoryHeader, MessageHistory, Message
-from src.api import side_query
+from src.api import query_model
 from src.memory.scan import scan_memory_files, format_memory_manifest
 
 logger = logging.getLogger(__name__)
@@ -65,13 +65,14 @@ async def find_relevant_memories(
 
         manifest = format_memory_manifest(headers)
 
-        response = await side_query(
-            model=config.MEMORY_SIDE_QUERY_MODEL,
+        response = await query_model(
+            model=config.MODELS.side_query,
             system=_SELECT_MEMORIES_SYSTEM_PROMPT,
             messages=[Message(
                 role="user",
                 content=f"Query: {query}\n\nAvailable memories:\n{manifest}",
             )],
+            tools=[],
             max_tokens=256,
         )
 

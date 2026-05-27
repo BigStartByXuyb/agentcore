@@ -21,13 +21,13 @@ def estimate_token_count(history: MessageHistory, state: AgentState | None = Non
     """
     if state and state.last_usage_tokens > 0 and state.messages_since_last_usage > 0:
         new_messages = history.messages[-state.messages_since_last_usage:]
-        new_estimate = _rough_estimate_messages(new_messages)
+        new_estimate = rough_estimate_messages(new_messages)
         return state.last_usage_tokens + new_estimate
 
-    return _rough_estimate_messages(history.messages)
+    return rough_estimate_messages(history.messages)
 
 
-def _rough_estimate_messages(messages: list) -> int:
+def rough_estimate_messages(messages: list) -> int:
     """Estimate token count for a list of messages using UTF-8 byte length."""
     total = 0
     for msg in messages:

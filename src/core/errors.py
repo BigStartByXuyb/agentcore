@@ -13,6 +13,7 @@ Two core responsibilities:
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 
 
@@ -171,6 +172,39 @@ def is_prompt_too_long(error: Exception) -> bool:
         return ("prompt is too long" in msg or "prompt_too_long" in msg
                 or "too many tokens" in msg or "context_length_exceeded" in msg)
     return False
+
+
+_PTL_TOKEN_RE = re.compile(
+    r'prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)',
+    re.IGNORECASE,
+)
+
+
+def parse_ptl_token_counts(error_message: str) -> tuple[int | None, int | None]:
+    """Parse actual/limit token counts from a prompt-too-long error message.
+
+    Example: "prompt is too long: 137500 tokens > 135000 maximum"
+    Returns (actual_tokens, limit_tokens) or (None, None) if unparseable.
+    """
+    match = _PTL_TOKEN_RE.search(error_message)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None, None
+
+
+def get_ptl_token_gap(error: Exception | str | None) -> int | None:
+    """Return how many tokens over the limit a PTL error reports.
+
+    Accepts an Exception, a raw error message string, or None.
+    Returns the gap (actual - limit) if parseable, None otherwise.
+    """
+    if error is None:
+        return None
+    actual, limit = parse_ptl_token_counts(str(error))
+    if actual is None or limit is None:
+        return None
+    gap = actual - limit
+    return gap if gap > 0 else None
 
 
 def create_assistant_error_message(error: Exception) -> dict:

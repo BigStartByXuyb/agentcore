@@ -15,7 +15,7 @@ Retry behaviour:
   - Non-retryable errors (400 bad request, 401 auth) are raised immediately
 
 Async model:
-  - create_message / side_query: `await adapter.method(...)`
+  - create_message: `await adapter.create_message(...)`
   - stream_message: returns an async context manager.  Use
       `async with adapter.stream_message(...) as stream:
            async for text in stream.text_stream: ...
@@ -29,9 +29,12 @@ from __future__ import annotations
 import asyncio
 import random
 import logging
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import anthropic
+
+if TYPE_CHECKING:
+    from src.core.config import ProviderModels
 from anthropic import APIError, APIConnectionError
 
 from src.core import config
@@ -169,6 +172,18 @@ class AnthropicAdapter:
     def __init__(self) -> None:
         self._client: anthropic.AsyncAnthropic | None = None
 
+    # -- default models -----------------------------------------------------
+
+    def get_default_models(self) -> ProviderModels:
+        from src.core.config import ProviderModels
+        return ProviderModels(
+            provider="anthropic",
+            main="claude-sonnet-4-6",
+            compact="claude-sonnet-4-6",
+            side_query="claude-haiku-4-5-20251001",
+            fallback="claude-haiku-4-5-20251001",
+        )
+
     # -- client lifecycle ---------------------------------------------------
 
     def get_client(self) -> anthropic.AsyncAnthropic:
@@ -202,10 +217,11 @@ class AnthropicAdapter:
         thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
-    ) -> anthropic.types.Message:
+        output_format: dict | None = None,
+    ) -> ProviderMessage:
         """Call messages.create() with retry and error handling."""
         client = self.get_client()
-        resolved_model = model or config.MODEL
+        resolved_model = model or config.MODELS.main
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
         api_messages = _messages_to_anthropic(messages)
 
@@ -224,7 +240,10 @@ class AnthropicAdapter:
                 )
                 if thinking_dict is not None:
                     params["thinking"] = thinking_dict
-                return await client.messages.create(**params)
+                if output_format is not None:
+                    params["response_format"] = output_format
+                response = await client.messages.create(**params)
+                return _sdk_message_to_provider(response)
 
             except APIConnectionError as e:
                 last_error = e
@@ -282,7 +301,7 @@ class AnthropicAdapter:
     ) -> ProviderStreamCM:
         """Create a streaming API call with retry, returning an *async* stream CM."""
         client = self.get_client()
-        resolved_model = model or config.MODEL
+        resolved_model = model or config.MODELS.main
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
         api_messages = _messages_to_anthropic(messages)
 
@@ -304,59 +323,6 @@ class AnthropicAdapter:
             max_retries=max_retries,
             on_retry=on_retry,
         )
-
-    # -- side query ---------------------------------------------------------
-
-    async def side_query(
-        self,
-        *,
-        model: str,
-        system: str,
-        messages: list[Message],
-        max_tokens: int = 256,
-        output_format: dict | None = None,
-        thinking: bool = False,
-    ) -> anthropic.types.Message:
-        """Lightweight LLM call for side tasks."""
-        client = self.get_client()
-        api_messages = _messages_to_anthropic(messages)
-        thinking_dict = _build_thinking_dict(max_tokens) if thinking else None
-        last_error: Exception | None = None
-
-        for attempt in range(1, DEFAULT_MAX_RETRIES + 2):
-            try:
-                params: dict[str, Any] = dict(
-                    model=model,
-                    max_tokens=max_tokens,
-                    system=system,
-                    messages=api_messages,
-                )
-                if output_format is not None:
-                    params["response_format"] = output_format
-                if thinking_dict is not None:
-                    params["thinking"] = thinking_dict
-                return await client.messages.create(**params)
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning("side_query connection error (attempt %d): %s", attempt, e)
-
-            except APIError as e:
-                last_error = e
-                if not _is_retryable(e):
-                    raise
-
-            except Exception:
-                raise
-
-            if attempt > DEFAULT_MAX_RETRIES:
-                break
-
-            delay = _get_retry_delay(attempt)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
 
 
 # ---------------------------------------------------------------------------

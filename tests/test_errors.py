@@ -18,7 +18,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from anthropic import APIError, APIConnectionError
 
-from src.core.errors import AgentErrorCode, classify_api_error, create_assistant_error_message
+from src.core.errors import (
+    AgentErrorCode,
+    classify_api_error,
+    create_assistant_error_message,
+    parse_ptl_token_counts,
+    get_ptl_token_gap,
+)
 from src.messages import build_tool_result_content
 from src.core.types import ToolResult, ToolUseContext
 
@@ -116,6 +122,70 @@ class TestClassifyApiError:
     def test_generic_unknown_exception(self):
         err = Exception("something went wrong")
         assert classify_api_error(err) == AgentErrorCode.API_UNKNOWN
+
+
+# =========================================================================
+# 1b. errors.py — parse_ptl_token_counts / get_ptl_token_gap
+# =========================================================================
+
+class TestParsePtlTokenCounts:
+    def test_standard_format(self):
+        actual, limit = parse_ptl_token_counts(
+            "prompt is too long: 137500 tokens > 135000 maximum"
+        )
+        assert actual == 137500
+        assert limit == 135000
+
+    def test_no_units_suffix(self):
+        actual, limit = parse_ptl_token_counts(
+            "prompt is too long: 200000 token > 128000"
+        )
+        assert actual == 200000
+        assert limit == 128000
+
+    def test_case_insensitive(self):
+        actual, limit = parse_ptl_token_counts(
+            "Prompt Is Too Long: 150000 Tokens > 100000"
+        )
+        assert actual == 150000
+        assert limit == 100000
+
+    def test_unparseable_no_numbers(self):
+        actual, limit = parse_ptl_token_counts("prompt is too long")
+        assert actual is None
+        assert limit is None
+
+    def test_unrelated_message(self):
+        actual, limit = parse_ptl_token_counts("connection refused")
+        assert actual is None
+        assert limit is None
+
+    def test_context_length_exceeded_no_match(self):
+        actual, limit = parse_ptl_token_counts("context_length_exceeded")
+        assert actual is None
+        assert limit is None
+
+
+class TestGetPtlTokenGap:
+    def test_gap_calculation(self):
+        err = Exception("prompt is too long: 150000 tokens > 128000 maximum")
+        gap = get_ptl_token_gap(err)
+        assert gap == 22000
+
+    def test_unparseable_returns_none(self):
+        err = Exception("prompt is too long")
+        gap = get_ptl_token_gap(err)
+        assert gap is None
+
+    def test_zero_gap_returns_none(self):
+        err = Exception("prompt is too long: 128000 tokens > 128000")
+        gap = get_ptl_token_gap(err)
+        assert gap is None
+
+    def test_negative_gap_returns_none(self):
+        err = Exception("prompt is too long: 100000 tokens > 128000")
+        gap = get_ptl_token_gap(err)
+        assert gap is None
 
 
 # =========================================================================

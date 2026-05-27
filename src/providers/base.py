@@ -7,17 +7,16 @@ which backend is actually responding.
 Design contract (async):
   - create_message()   → awaitable, returns ProviderMessage (or duck-typed
                          equivalent like anthropic.types.Message).
+                         Pass tools=[] for non-tool-using calls (e.g.
+                         compact, memory recall).
   - stream_message()   → returns an *async* context manager yielding a
                          ProviderStream (see stream.py).
-  - side_query()       → lightweight awaitable call for memory recall,
-                         classification, etc.  No tools, no streaming,
-                         no retry events.
 
 The duck-typing contract means agent_loop never needs provider-specific
 branches. Anthropic's native Message already matches ProviderMessage shape.
 
 Thinking parameter:
-  All three methods accept `thinking: bool`. When True, each adapter
+  Both methods accept `thinking: bool`. When True, each adapter
   enables its own thinking mechanism internally:
     - Anthropic: sends {"type": "enabled", "budget_tokens": ...}
     - DeepSeek: switches to deepseek-reasoner model
@@ -29,8 +28,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, Callable
 
 from src.providers.stream import ProviderStream
+from src.providers.types import ProviderMessage
 
 if TYPE_CHECKING:
+    from src.core.config import ProviderModels
     from src.core.types import Message
 
 # Signature: (delay_seconds, attempt, max_attempts)
@@ -51,6 +52,10 @@ class ProviderStreamCM(Protocol):
 class ProviderAdapter(Protocol):
     """Unified interface implemented by every provider backend."""
 
+    def get_default_models(self) -> ProviderModels:
+        """Return the provider's default model tiers."""
+        ...
+
     async def create_message(
         self,
         *,
@@ -62,7 +67,8 @@ class ProviderAdapter(Protocol):
         thinking: bool = False,
         max_retries: int = 3,
         on_retry: RetryCallback | None = None,
-    ) -> Any:
+        output_format: dict | None = None,
+    ) -> ProviderMessage:
         """Non-streaming message creation."""
         ...
 
@@ -79,17 +85,4 @@ class ProviderAdapter(Protocol):
         on_retry: RetryCallback | None = None,
     ) -> ProviderStreamCM:
         """Streaming message creation."""
-        ...
-
-    async def side_query(
-        self,
-        *,
-        model: str,
-        system: str,
-        messages: list[Message],
-        max_tokens: int = 256,
-        output_format: dict | None = None,
-        thinking: bool = False,
-    ) -> Any:
-        """Lightweight call for side tasks (memory recall, compaction, etc)."""
         ...

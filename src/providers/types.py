@@ -8,6 +8,7 @@ both anthropic.types.Message (native) and ProviderMessage match this shape.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
@@ -21,7 +22,7 @@ class Usage:
 @dataclass
 class TextBlock:
     text: str = ""
-    type: str = "text"
+    type: Literal["text"] = "text"
 
 
 @dataclass
@@ -29,20 +30,20 @@ class ToolUseBlock:
     id: str = ""
     name: str = ""
     input: dict = field(default_factory=dict)
-    type: str = "tool_use"
+    type: Literal["tool_use"] = "tool_use"
 
 
 @dataclass
 class ThinkingBlock:
     thinking: str = ""
     signature: str = ""
-    type: str = "thinking"
+    type: Literal["thinking"] = "thinking"
 
 
 @dataclass
 class RedactedThinkingBlock:
     data: str = ""
-    type: str = "redacted_thinking"
+    type: Literal["redacted_thinking"] = "redacted_thinking"
 
 
 ProviderContentBlock = TextBlock | ToolUseBlock | ThinkingBlock | RedactedThinkingBlock

@@ -4,6 +4,7 @@ from src.compact.grouping import (
     group_messages_by_round,
     truncate_head,
     ensure_tool_result_pairing,
+    PTL_RETRY_MARKER,
 )
 from src.core.types import (
     Message,
@@ -286,3 +287,67 @@ class TestEnsureToolResultPairing:
         ]
         result = ensure_tool_result_pairing(msgs)
         assert result is msgs
+
+
+# ---------------------------------------------------------------------------
+# PTL retry marker
+# ---------------------------------------------------------------------------
+
+class TestPtlRetryMarker:
+    def test_truncation_uses_marker(self):
+        """After truncation, assistant-first results get the PTL_RETRY_MARKER."""
+        msgs = [
+            _user("first"),
+            _assistant(text="a1"),
+            _user("second"),
+            _assistant(text="a2"),
+            _user("third"),
+            _assistant(text="a3"),
+        ]
+        result = truncate_head(msgs)
+        assert result is not None
+        assert result[0].role == "user"
+        assert result[0].content == PTL_RETRY_MARKER
+        assert result[0].msg_type == "meta"
+
+    def test_strips_previous_marker_before_grouping(self):
+        """Previous PTL marker is stripped before re-grouping to avoid stall."""
+        msgs = [
+            Message(role="user", content=PTL_RETRY_MARKER, msg_type="meta"),
+            _assistant(text="a1"),
+            _user("second"),
+            _assistant(text="a2"),
+            _user("third"),
+            _assistant(text="a3"),
+        ]
+        result = truncate_head(msgs)
+        assert result is not None
+        marker_count = sum(
+            1 for m in result
+            if isinstance(m.content, str) and m.content == PTL_RETRY_MARKER
+        )
+        assert marker_count <= 1
+
+    def test_no_double_marker_on_repeated_truncation(self):
+        """Repeated truncation doesn't stack markers."""
+        msgs = [
+            _user("first"),
+            _assistant(text="a1"),
+            _user("second"),
+            _assistant(text="a2"),
+            _user("third"),
+            _assistant(text="a3"),
+            _user("fourth"),
+            _assistant(text="a4"),
+        ]
+        # First truncation
+        result = truncate_head(msgs)
+        assert result is not None
+        # Second truncation
+        result2 = truncate_head(result)
+        if result2 is not None:
+            marker_count = sum(
+                1 for m in result2
+                if isinstance(m.content, str) and m.content == PTL_RETRY_MARKER
+            )
+            assert marker_count <= 1

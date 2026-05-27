@@ -1,6 +1,7 @@
 """Configuration loaded from environment variables."""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 ANTHROPIC_AUTH_TOKEN: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -13,11 +14,59 @@ PROVIDER: str = os.environ.get("AGENT_PROVIDER", "anthropic")
 # DeepSeek
 DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL: str | None = os.environ.get("DEEPSEEK_BASE_URL", None)
-DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_REASONER_MODEL: str = os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner")
 
-MODEL: str = os.environ.get("AGENT_MODEL",
-    "claude-sonnet-4-6" if PROVIDER == "anthropic" else DEEPSEEK_MODEL)
+
+# ---------------------------------------------------------------------------
+# Model tiers — per-provider model configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProviderModels:
+    """Model tiers for a provider.
+
+    - provider: which provider these models belong to
+    - main: primary model for the agent loop (user's choice)
+    - compact: model for conversation summarization
+    - side_query: cheap/fast model for memory recall, selection tasks
+    - fallback: degradation target when main fails (thinking errors, etc.)
+    """
+    provider: str
+    main: str
+    compact: str
+    side_query: str
+    fallback: str
+
+
+def get_models() -> ProviderModels:
+    """Build ProviderModels from defaults + env overrides.
+
+    Priority: env var > user's AGENT_MODEL > provider default.
+    If AGENT_MODEL is set but AGENT_COMPACT_MODEL is not, compact follows main.
+    Raises ValueError if PROVIDER is not registered in the provider registry.
+    """
+    from src.providers import get_provider
+
+    adapter = get_provider(PROVIDER)
+    defaults = adapter.get_default_models()
+
+    user_main = os.environ.get("AGENT_MODEL")
+    main = user_main or defaults.main
+    compact = os.environ.get("AGENT_COMPACT_MODEL") or (main if user_main else defaults.compact)
+    side_query = os.environ.get("AGENT_SIDE_QUERY_MODEL") or defaults.side_query
+    fallback = os.environ.get("AGENT_FALLBACK_MODEL") or defaults.fallback
+
+    return ProviderModels(
+        provider=PROVIDER,
+        main=main,
+        compact=compact,
+        side_query=side_query,
+        fallback=fallback,
+    )
+
+
+MODELS: ProviderModels = get_models()
+MODEL: str = MODELS.main  # backward-compatible alias
 MAX_TOKENS: int = 16384
 MAX_CONTEXT_WINDOW: int = 200_000  # model context window size (for auto compact threshold)
 MAX_TURNS: int = 30
@@ -29,7 +78,6 @@ THINKING_BUDGET_TOKENS: int = 10000  # budget_tokens for thinking (must be < MAX
 
 # Memory System
 MEMORY_ENABLED: bool = True
-MEMORY_SIDE_QUERY_MODEL: str = "claude-haiku-4-5-20251001"  # cheap model for recall side query
 MEMORY_MAX_FILES: int = 200          # max memory files to scan
 MEMORY_MAX_RELEVANT: int = 5         # max memories to inject per turn
 

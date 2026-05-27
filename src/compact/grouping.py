@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.core.types import ContentBlock
 
 MAX_PTL_RETRIES = 3
+PTL_RETRY_MARKER = '[earlier conversation truncated for compaction retry]'
 
 
 # ---------------------------------------------------------------------------
@@ -73,24 +74,50 @@ def group_messages_by_round(messages: list[Message]) -> list[list[Message]]:
 def truncate_head(
     messages: list[Message],
     drop_ratio: float = 0.2,
+    token_gap: int | None = None,
 ) -> list[Message] | None:
     """Drop the oldest N groups of messages, return the remainder.
 
     - Groups by API round-trip (group_messages_by_round)
-    - Drops max(1, total_groups * drop_ratio) oldest groups
+    - When *token_gap* is given, drops groups until estimated tokens >= gap
+    - Otherwise drops max(1, total_groups * drop_ratio) oldest groups
     - At least 1 group must remain (returns None if impossible)
     - If the truncated result starts with an assistant message,
-      prepends a synthetic user message to satisfy API constraints
+      prepends a synthetic user message (PTL_RETRY_MARKER) to satisfy
+      API constraints
     - Runs ensure_tool_result_pairing as a defensive final pass
 
     Returns None if truncation is impossible (0 or 1 groups).
     """
+    # Strip our own marker from a previous retry before grouping.
+    # Otherwise it becomes its own group and the drop ratio stalls.
+    if (
+        messages
+        and messages[0].role == "user"
+        and messages[0].msg_type == "meta"
+        and isinstance(messages[0].content, str)
+        and messages[0].content == PTL_RETRY_MARKER
+    ):
+        messages = messages[1:]
+
     groups = group_messages_by_round(messages)
 
     if len(groups) <= 1:
         return None
 
-    n_drop = max(1, int(len(groups) * drop_ratio))
+    if token_gap is not None:
+        from src.utils.tokens import rough_estimate_messages
+        n_drop = 0
+        accumulated = 0
+        for g in groups[:-1]:  # keep at least 1 group
+            accumulated += rough_estimate_messages(g)
+            n_drop += 1
+            if accumulated >= token_gap:
+                break
+        n_drop = max(1, n_drop)
+    else:
+        n_drop = max(1, int(len(groups) * drop_ratio))
+
     remaining_groups = groups[n_drop:]
 
     if not remaining_groups:
@@ -103,8 +130,8 @@ def truncate_head(
     if result and result[0].role == "assistant":
         result.insert(0, Message(
             role="user",
-            content="[Earlier conversation was truncated to fit context window]",
-            msg_type="human",
+            content=PTL_RETRY_MARKER,
+            msg_type="meta",
         ))
 
     result = ensure_tool_result_pairing(result)

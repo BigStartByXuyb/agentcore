@@ -16,7 +16,10 @@ import asyncio
 import json
 import random
 import logging
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
+
+if TYPE_CHECKING:
+    from src.core.config import ProviderModels
 
 from src.core import config
 from src.core.types import Message
@@ -94,6 +97,18 @@ class DeepSeekAdapter:
     def __init__(self) -> None:
         self._client: Any = None  # openai.AsyncOpenAI
 
+    # -- default models -----------------------------------------------------
+
+    def get_default_models(self) -> ProviderModels:
+        from src.core.config import ProviderModels
+        return ProviderModels(
+            provider="deepseek",
+            main="deepseek-chat",
+            compact="deepseek-chat",
+            side_query="deepseek-chat",
+            fallback="deepseek-chat",
+        )
+
     def get_client(self) -> Any:
         if self._client is None:
             import openai
@@ -120,11 +135,12 @@ class DeepSeekAdapter:
         thinking: bool = False,
         max_retries: int = DEFAULT_MAX_RETRIES,
         on_retry: RetryCallback | None = None,
+        output_format: dict | None = None,
     ) -> ProviderMessage:
         from openai import APIError, APIConnectionError
 
         client = self.get_client()
-        default_model = config.DEEPSEEK_REASONER_MODEL if thinking else config.DEEPSEEK_MODEL
+        default_model = config.DEEPSEEK_REASONER_MODEL if thinking else config.MODELS.main
         resolved_model = model or default_model
         resolved_max_tokens = max_tokens or config.MAX_TOKENS
 
@@ -142,6 +158,8 @@ class DeepSeekAdapter:
                 )
                 if oai_tools:
                     params["tools"] = oai_tools
+                if output_format is not None:
+                    params["response_format"] = output_format
                 response = await client.chat.completions.create(**params)
                 return converter.response_to_provider(response)
 
@@ -210,58 +228,6 @@ class DeepSeekAdapter:
             max_retries=max_retries,
             on_retry=on_retry,
         )
-
-    # -- side query ---------------------------------------------------------
-
-    async def side_query(
-        self,
-        *,
-        model: str,
-        system: str,
-        messages: list[Message],
-        max_tokens: int = 256,
-        output_format: dict | None = None,
-        thinking: bool = False,
-    ) -> ProviderMessage:
-        from openai import APIError, APIConnectionError
-
-        client = self.get_client()
-        oai_messages = converter.messages_to_openai(messages, system)
-
-        last_error: Exception | None = None
-
-        for attempt in range(1, DEFAULT_MAX_RETRIES + 2):
-            try:
-                params: dict[str, Any] = dict(
-                    model=model,
-                    max_tokens=max_tokens,
-                    messages=oai_messages,
-                )
-                if output_format is not None:
-                    params["response_format"] = output_format
-                response = await client.chat.completions.create(**params)
-                return converter.response_to_provider(response)
-
-            except APIConnectionError as e:
-                last_error = e
-                logger.warning("DeepSeek side_query connection error (attempt %d): %s", attempt, e)
-
-            except APIError as e:
-                last_error = e
-                if not _is_retryable_openai(e):
-                    raise
-
-            except Exception:
-                raise
-
-            if attempt > DEFAULT_MAX_RETRIES:
-                break
-
-            delay = _get_retry_delay(attempt)
-            await asyncio.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +372,7 @@ class _DeepSeekStreamWithRetry:
         from openai import APIError, APIConnectionError
 
         client = self._adapter.get_client()
-        resolved_model = self._model or config.DEEPSEEK_MODEL
+        resolved_model = self._model or config.MODELS.main
         resolved_max_tokens = self._max_tokens or config.MAX_TOKENS
 
         oai_messages = converter.messages_to_openai(self._messages, self._system)

@@ -15,7 +15,6 @@ Public surface (async):
   - create_stream_with_retry(...) → adapter.stream_message(...)   (returns
                                     an async context manager — caller uses
                                     `async with ... as stream:`)
-  - side_query(...)               → await adapter.side_query(...)
   - get_client() / reset_client() → AsyncAnthropic client singleton access
                                     (kept for callers that still reach
                                     into the raw SDK; other providers
@@ -24,11 +23,12 @@ Public surface (async):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 from src.core import config
 from src.providers import get_provider
 from src.providers.base import ProviderStreamCM
+from src.providers.types import ProviderMessage
 
 if TYPE_CHECKING:
     from src.core.types import Message
@@ -83,7 +83,8 @@ async def query_model(
     thinking: bool = False,
     max_retries: int = DEFAULT_MAX_RETRIES,
     on_retry: _RetryCb | None = None,
-) -> Any:
+    output_format: dict | None = None,
+) -> ProviderMessage:
     """Call the active provider's create_message (awaited)."""
     adapter = get_provider(config.PROVIDER)
     return await adapter.create_message(
@@ -95,6 +96,7 @@ async def query_model(
         thinking=thinking,
         max_retries=max_retries,
         on_retry=on_retry,
+        output_format=output_format,
     )
 
 
@@ -130,27 +132,6 @@ def create_stream_with_retry(
     )
 
 
-async def side_query(
-    *,
-    model: str,
-    system: str,
-    messages: list[Message],
-    max_tokens: int = 256,
-    output_format: dict | None = None,
-    thinking: bool = False,
-) -> Any:
-    """Call the active provider's side_query (awaited)."""
-    adapter = get_provider(config.PROVIDER)
-    return await adapter.side_query(
-        model=model,
-        system=system,
-        messages=messages,
-        max_tokens=max_tokens,
-        output_format=output_format,
-        thinking=thinking,
-    )
-
-
 __all__ = [
     "DEFAULT_MAX_RETRIES",
     "BASE_DELAY_MS",
@@ -159,5 +140,4 @@ __all__ = [
     "reset_client",
     "query_model",
     "create_stream_with_retry",
-    "side_query",
 ]

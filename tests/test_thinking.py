@@ -5,8 +5,7 @@ Covers:
   - _serialize_content() handling of thinking blocks
   - _build_thinking_dict() logic (Anthropic adapter)
   - classify_api_error → API_THINKING_ERROR detection
-  - _clean_thinking_history() in-place cleanup
-  - strip_thinking_blocks() / filter_orphaned_thinking_messages()
+  - clean_thinking_history() in-place cleanup
   - ThinkingBlock event display via default_handler
   - token tracking with thinking tokens
   - 400 error recovery in run_agent_loop
@@ -21,14 +20,9 @@ from src.core.types import (
     AgentState, Message, ThinkingContent, RedactedThinkingContent,
     TextContent, ToolUseContent,
 )
-from src.messages import (
-    strip_thinking_blocks,
-    filter_orphaned_thinking_messages,
-    _is_thinking_block,
-)
+from src.messages import clean_thinking_history as _clean_thinking_history
 from src.agent_loop import (
     _serialize_content,
-    _clean_thinking_history,
     run_agent_loop,
 )
 from src.core.errors import classify_api_error, AgentErrorCode
@@ -49,24 +43,6 @@ class TestConfig:
 
     def test_budget_less_than_max_tokens(self):
         assert config.THINKING_BUDGET_TOKENS < config.MAX_TOKENS
-
-
-# ===================================================================
-# _is_thinking_block helper
-# ===================================================================
-
-class TestIsThinkingBlock:
-    def test_thinking_block(self):
-        assert _is_thinking_block({"type": "thinking", "thinking": "...", "signature": "sig"}) is True
-
-    def test_redacted_thinking_block(self):
-        assert _is_thinking_block({"type": "redacted_thinking", "data": "..."}) is True
-
-    def test_text_block(self):
-        assert _is_thinking_block({"type": "text", "text": "hello"}) is False
-
-    def test_tool_use_block(self):
-        assert _is_thinking_block({"type": "tool_use", "id": "1", "name": "bash", "input": {}}) is False
 
 
 # ===================================================================
@@ -176,94 +152,7 @@ class TestThinkingErrorClassification:
 
 
 # ===================================================================
-# strip_thinking_blocks
-# ===================================================================
-
-class TestStripThinkingBlocks:
-    def test_strips_thinking_from_assistant(self):
-        messages = [
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "hmm", "signature": "s"},
-                {"type": "text", "text": "hello"},
-            ]},
-        ]
-        result = strip_thinking_blocks(messages)
-        assert len(result) == 1
-        assert len(result[0]["content"]) == 1
-        assert result[0]["content"][0]["type"] == "text"
-
-    def test_strips_redacted_thinking(self):
-        messages = [
-            {"role": "assistant", "content": [
-                {"type": "redacted_thinking", "data": "x"},
-                {"type": "text", "text": "hi"},
-            ]},
-        ]
-        result = strip_thinking_blocks(messages)
-        assert result[0]["content"] == [{"type": "text", "text": "hi"}]
-
-    def test_leaves_user_messages_untouched(self):
-        messages = [{"role": "user", "content": "hello"}]
-        result = strip_thinking_blocks(messages)
-        assert result is messages  # same object — no change
-
-    def test_no_thinking_returns_same_list(self):
-        messages = [
-            {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
-        ]
-        result = strip_thinking_blocks(messages)
-        assert result is messages
-
-    def test_all_thinking_stripped_to_empty(self):
-        messages = [
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "t", "signature": "s"},
-            ]},
-        ]
-        result = strip_thinking_blocks(messages)
-        assert result[0]["content"] == []
-
-
-# ===================================================================
-# filter_orphaned_thinking_messages
-# ===================================================================
-
-class TestFilterOrphanedThinkingMessages:
-    def test_removes_thinking_only_assistant(self):
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "t", "signature": "s"},
-            ]},
-            {"role": "user", "content": "next"},
-        ]
-        result = filter_orphaned_thinking_messages(messages)
-        assert len(result) == 2
-        assert all(m["role"] == "user" for m in result)
-
-    def test_keeps_mixed_assistant(self):
-        messages = [
-            {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "t", "signature": "s"},
-                {"type": "text", "text": "hello"},
-            ]},
-        ]
-        result = filter_orphaned_thinking_messages(messages)
-        assert len(result) == 1
-
-    def test_removes_empty_content_assistant(self):
-        messages = [{"role": "assistant", "content": []}]
-        result = filter_orphaned_thinking_messages(messages)
-        assert len(result) == 0
-
-    def test_keeps_non_list_content(self):
-        messages = [{"role": "assistant", "content": "text"}]
-        result = filter_orphaned_thinking_messages(messages)
-        assert len(result) == 1
-
-
-# ===================================================================
-# _clean_thinking_history (in-place)
+# clean_thinking_history (in-place)
 # ===================================================================
 
 class TestCleanThinkingHistory:

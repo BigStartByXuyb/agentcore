@@ -150,25 +150,42 @@ async def query_model(
     max_retries: int = DEFAULT_MAX_RETRIES,
     output_format: dict | None = None,
 ) -> ProviderMessage:
-    """Non-streaming API call — for side queries that don't need streaming events."""
+    """Non-streaming API call — for side queries that don't need streaming events.
+
+    Never raises — all errors are returned as ProviderMessage(is_error=True),
+    matching query_model_stream's error-as-message pattern.
+    """
     adapter = get_provider(config.PROVIDER)
-    result: ProviderMessage | None = None
-    async for item in with_retry(
-        lambda: adapter.create_message(
-            messages=messages, system=system, tools=tools,
-            model=model, max_tokens=max_tokens, thinking=thinking,
-            output_format=output_format,
-        ),
-        is_retryable=adapter.is_retryable,
-        extract_retry_after=adapter.extract_retry_after,
-        connection_error_types=adapter.connection_error_types,
-        max_retries=max_retries,
-        label=adapter.label,
-    ):
-        if not isinstance(item, RetryEvent):
-            result = item
-    assert result is not None
-    return result
+
+    try:
+        result: ProviderMessage | None = None
+        async for item in with_retry(
+            lambda: adapter.create_message(
+                messages=messages, system=system, tools=tools,
+                model=model, max_tokens=max_tokens, thinking=thinking,
+                output_format=output_format,
+            ),
+            is_retryable=adapter.is_retryable,
+            extract_retry_after=adapter.extract_retry_after,
+            connection_error_types=adapter.connection_error_types,
+            max_retries=max_retries,
+            label=adapter.label,
+        ):
+            if not isinstance(item, RetryEvent):
+                result = item
+        assert result is not None
+        return result
+
+    except Exception as e:
+        logger.warning("API error in query_model: %s", e)
+        error_code = classify_api_error(e)
+        return ProviderMessage(
+            content=[TextBlock(text=create_error_text(e))],
+            stop_reason="error",
+            is_error=True,
+            error=e,
+            error_code=error_code.value,
+        )
 
 
 __all__ = [

@@ -42,7 +42,11 @@ class AgentErrorCode(Enum):
 # API error classification
 # ---------------------------------------------------------------------------
 
-_PTL_KEYWORDS = ("prompt is too long", "prompt_too_long", "context_length_exceeded", "too many tokens")
+_PTL_KEYWORDS = (
+    "prompt is too long", "prompt_too_long",
+    "context_length_exceeded", "maximum context length",
+    "too many tokens",
+)
 _THINKING_KEYWORDS = ("invalid signature", "thinking blocks cannot be modified")
 
 
@@ -173,21 +177,33 @@ def is_prompt_too_long(error: Exception) -> bool:
     return classify_api_error(error) == AgentErrorCode.API_PROMPT_TOO_LONG
 
 
-_PTL_TOKEN_RE = re.compile(
-    r'prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)',
-    re.IGNORECASE,
-)
+# Token extraction from PTL errors — keep in sync with _PTL_KEYWORDS above
+_PTL_TOKEN_PATTERNS = [
+    # Anthropic: "prompt is too long: 200000 tokens > 128000"
+    re.compile(r'prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)', re.IGNORECASE),
+    # OpenAI/DeepSeek: "maximum context length is 65536 tokens. However, your messages resulted in 70000 tokens"
+    re.compile(r'maximum context length is (\d+) tokens.*?resulted in (\d+) tokens', re.IGNORECASE),
+]
 
 
 def parse_ptl_token_counts(error_message: str) -> tuple[int | None, int | None]:
     """Parse actual/limit token counts from a prompt-too-long error message.
 
-    Example: "prompt is too long: 137500 tokens > 135000 maximum"
+    Supports multiple provider formats:
+      - Anthropic: "prompt is too long: 200000 tokens > 128000"
+        → (actual=200000, limit=128000)
+      - OpenAI/DeepSeek: "maximum context length is 65536 tokens. However, your messages resulted in 70000 tokens"
+        → (actual=70000, limit=65536)
+
     Returns (actual_tokens, limit_tokens) or (None, None) if unparseable.
     """
-    match = _PTL_TOKEN_RE.search(error_message)
-    if match:
-        return int(match.group(1)), int(match.group(2))
+    for pattern in _PTL_TOKEN_PATTERNS:
+        match = pattern.search(error_message)
+        if match:
+            a, b = int(match.group(1)), int(match.group(2))
+            # Anthropic: group(1)=actual, group(2)=limit
+            # OpenAI:    group(1)=limit, group(2)=actual
+            return (a, b) if a > b else (b, a)
     return None, None
 
 

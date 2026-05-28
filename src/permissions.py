@@ -257,3 +257,23 @@ class PermissionEngine:
         if rule.tool_name.lower() != tool_name.lower() and rule.tool_name.lower() != "*":
             return False
         return match_content(rule.content_pattern, content)
+
+
+# ---------------------------------------------------------------------------
+# Singleton access
+# ---------------------------------------------------------------------------
+
+_default_engine: PermissionEngine | None = None
+
+
+def get_permission_engine() -> PermissionEngine:
+    """Lazy-init singleton PermissionEngine with two-layer config."""
+    global _default_engine
+    if _default_engine is None:
+        from src.core.config import get_permission_config_paths
+        user_config, project_config = get_permission_config_paths()
+        _default_engine = PermissionEngine(
+            user_config=user_config,
+            project_config=project_config,
+        )
+    return _default_engine

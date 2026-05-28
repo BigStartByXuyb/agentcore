@@ -148,78 +148,30 @@ def build_tool_result_content(tool_use_id: str, content: str, is_error: bool = F
 
 
 # ---------------------------------------------------------------------------
-# Thinking block cleanup — mirrors Claude Code's messages.ts
+# Thinking block cleanup
 # ---------------------------------------------------------------------------
 
-def _is_thinking_block(block: dict) -> bool:
-    """Check if a content block is a thinking or redacted_thinking block."""
-    return block.get("type") in ("thinking", "redacted_thinking")
+def clean_thinking_history(messages: list) -> None:
+    """In-place strip all thinking blocks from Message history.
 
-
-def strip_thinking_blocks(messages: list[dict]) -> list[dict]:
-    """Remove thinking/redacted_thinking blocks from all assistant messages.
-
-    Thinking block signatures are bound to the API key + model that generated
-    them.  After a credential change or model switch they become invalid and
-    the API rejects them with a 400.  Stripping them lets the conversation
-    continue.
-
-    Mirrors Claude Code's stripSignatureBlocks() in messages.ts:5066.
-    Returns a new list (does not mutate the input).
+    Used by agent_loop for thinking-400 recovery: removes stale thinking
+    signatures so the next API call can generate fresh ones.
     """
-    changed = False
-    result: list[dict] = []
+    from src.core.types import Message, ThinkingContent, RedactedThinkingContent
+
+    result: list[Message] = []
     for msg in messages:
-        if msg.get("role") != "assistant":
+        if msg.role != "assistant":
             result.append(msg)
             continue
-
-        content = msg.get("content")
+        content = msg.content
         if not isinstance(content, list):
             result.append(msg)
             continue
-
-        filtered = [b for b in content if not _is_thinking_block(b)]
-        if len(filtered) == len(content):
-            result.append(msg)
-        else:
-            changed = True
-            result.append({**msg, "content": filtered})
-
-    return result if changed else messages
-
-
-def filter_orphaned_thinking_messages(messages: list[dict]) -> list[dict]:
-    """Remove assistant messages that contain ONLY thinking blocks.
-
-    These orphaned thinking-only messages cause "thinking blocks cannot be
-    modified" API errors.  They can appear when streaming yields separate
-    messages per content block and interleaved user messages prevent proper
-    merging.
-
-    Mirrors Claude Code's filterOrphanedThinkingOnlyMessages() in
-    messages.ts:4991.
-    Returns a new list (does not mutate the input).
-    """
-    result: list[dict] = []
-    for msg in messages:
-        if msg.get("role") != "assistant":
-            result.append(msg)
+        filtered = [b for b in content if not isinstance(b, (ThinkingContent, RedactedThinkingContent))]
+        if not filtered:
             continue
-
-        content = msg.get("content")
-        if not isinstance(content, list):
-            result.append(msg)
-            continue
-
-        if len(content) == 0:
-            # Empty content — skip (can result from strip_thinking_blocks
-            # removing all blocks from a thinking-only message)
-            continue
-
-        all_thinking = all(_is_thinking_block(b) for b in content)
-        if not all_thinking:
-            result.append(msg)
-            # Orphaned thinking-only message — skip it
-
-    return result
+        if len(filtered) < len(content):
+            msg.content = filtered
+        result.append(msg)
+    messages[:] = result

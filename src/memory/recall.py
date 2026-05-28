@@ -11,13 +11,15 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
 from src.core import config
-from src.core.types import MemoryHeader, MessageHistory, Message
+from src.core.types import Attachment, MemoryHeader, MessageHistory, Message
 from src.api import query_model
 from src.memory.scan import scan_memory_files, format_memory_manifest
+from src.memory.paths import get_memory_dir
 
 logger = logging.getLogger(__name__)
 
@@ -99,3 +101,46 @@ async def find_relevant_memories(
     except Exception as e:
         logger.debug("find_relevant_memories failed (non-critical): %s", e)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Memory context preparation — called from agent_loop as async task
+# ---------------------------------------------------------------------------
+
+async def _read_memory_files(headers: list[MemoryHeader]) -> list[str]:
+    """Read body content (without frontmatter) of selected memory files."""
+    from src.frontmatter import parse_frontmatter
+
+    def _read_sync() -> list[str]:
+        texts: list[str] = []
+        for h in headers:
+            try:
+                with open(h.file_path, "r", encoding="utf-8", errors="replace") as f:
+                    raw = f.read(4000)
+                _, body = parse_frontmatter(raw)
+                body = body.strip()
+                if body:
+                    texts.append(f"[{h.filename}]\n{body}")
+            except OSError:
+                continue
+        return texts
+
+    return await asyncio.to_thread(_read_sync)
+
+
+async def prepare_memory_context(user_input: str, history: MessageHistory) -> Attachment | None:
+    """Select and read relevant memories, return as Attachment."""
+    mem_dir = get_memory_dir()
+
+    relevant_memories = await find_relevant_memories(user_input, mem_dir, history)
+    recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
+
+    if not recalled_texts:
+        return None
+
+    parts: list[str] = ["<memory-recalled>"]
+    parts.append("\n\n---\n\n".join(recalled_texts))
+    parts.append("</memory-recalled>")
+
+    memory_files = {"files": [h.file_path for h in relevant_memories]}
+    return Attachment(type="relevant_memories", content="\n".join(parts), metadata=memory_files)

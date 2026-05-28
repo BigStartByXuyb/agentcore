@@ -38,4 +38,6 @@ def rough_estimate_messages(messages: list) -> int:
                 text = getattr(block, "text", None) or getattr(block, "content", None) or ""
                 if isinstance(text, str):
                     total += config.estimate_tokens(text)
+        for att in getattr(msg, "attachments", None) or []:
+            total += config.estimate_tokens(att.content)
     return total

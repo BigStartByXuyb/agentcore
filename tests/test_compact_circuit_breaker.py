@@ -62,6 +62,15 @@ def _make_mock_response(text: str = "Summary: conversation about greetings"):
     )
 
 
+def _make_error_response(error_text: str, error_code: str = "api_unknown"):
+    return ProviderMessage(
+        content=[TextBlock(text=error_text)],
+        stop_reason="error",
+        is_error=True,
+        error_code=error_code,
+    )
+
+
 # ---------------------------------------------------------------------------
 # auto_compact with PTL retry
 # ---------------------------------------------------------------------------
@@ -96,7 +105,10 @@ class TestAutoCompactRetry:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise Exception("prompt is too long: 200000 > 128000")
+                return _make_error_response(
+                    "prompt is too long: 200000 > 128000",
+                    error_code="api_prompt_too_long",
+                )
             return _make_mock_response("Summary: three exchanges")
 
         with patch("src.compact.auto_compact.query_model", side_effect=_mock_query):
@@ -114,7 +126,10 @@ class TestAutoCompactRetry:
             history.add_assistant([TextContent(text=f"resp{i}")])
 
         async def _always_ptl(**kwargs):
-            raise Exception("prompt is too long")
+            return _make_error_response(
+                "prompt is too long",
+                error_code="api_prompt_too_long",
+            )
 
         with patch("src.compact.auto_compact.query_model", side_effect=_always_ptl):
             result = await auto_compact(history)
@@ -132,14 +147,14 @@ class TestAutoCompactRetry:
         async def _fail(**kwargs):
             nonlocal call_count
             call_count += 1
-            raise Exception("connection refused")
+            return _make_error_response("connection refused")
 
         with patch("src.compact.auto_compact.query_model", side_effect=_fail):
             result = await auto_compact(history)
 
         assert result is False
-        # 2 calls: primary (with thinking) + fallback (without thinking)
-        assert call_count == 2
+        # Only 1 call: non-PTL/non-thinking errors don't trigger thinking fallback
+        assert call_count == 1
 
     @pytest.mark.asyncio
     async def test_empty_history(self):
@@ -173,7 +188,10 @@ class TestTruncationStatePreservation:
             call_message_counts.append(msg_count)
             if call_count <= 2:
                 # Both thinking and non-thinking fail with PTL on first truncation state
-                raise Exception("prompt is too long: 200000 tokens > 128000")
+                return _make_error_response(
+                    "prompt is too long: 200000 tokens > 128000",
+                    error_code="api_prompt_too_long",
+                )
             # After truncation, succeed
             return _make_mock_response("Summary")
 
@@ -204,7 +222,10 @@ class TestTruncationStatePreservation:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise Exception("prompt is too long: 200000 > 128000")
+                return _make_error_response(
+                    "prompt is too long: 200000 > 128000",
+                    error_code="api_prompt_too_long",
+                )
             return _make_mock_response("Summary")
 
         with patch("src.compact.auto_compact.query_model", side_effect=_mock_query):

@@ -30,9 +30,10 @@ from src.core.types import (
     ToolUseContext, make_missing_tool_results,
 )
 from src.system_prompt import build_system_prompt
-from src.messages import build_tool_schemas, build_tool_result_content
+from src.messages import build_tool_schemas, build_tool_result_content, clean_thinking_history
 from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
 from src.tool_runner import StreamingToolExecutor, DenialAbortError, DenialTracker
+from src.permissions import get_permission_engine
 from src.tools import registry as tool_registry
 from src.api import query_model, query_model_stream
 from src.providers.stream import StreamEvent
@@ -45,7 +46,7 @@ from src.core.events import (
     CompactCircuitBreaker, BlockingLimitReached,
 )
 from src.display import make_interactive_handler, default_handler
-from src.memory.recall import find_relevant_memories
+from src.memory.recall import prepare_memory_context
 from src.memory.paths import get_memory_dir
 from src.compact.micro_compact import should_micro_compact, micro_compact
 from src.compact.auto_compact import (
@@ -328,6 +329,13 @@ async def run_agent_loop(
         if response.is_error:
             ec = response.error_code
 
+            # Unrecoverable — bail out immediately
+            if ec == AgentErrorCode.API_AUTH_ERROR.value:
+                error_text = response.content[0].text if response.content else "Unknown error"
+                history.add_assistant([TextContent(text=error_text)])
+                on_event(ErrorEvent(label=label, error_text=error_text))
+                break
+
             # Layer 3: reactive compact on prompt_too_long (bypasses circuit breaker)
             if ec == AgentErrorCode.API_PROMPT_TOO_LONG.value:
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
@@ -344,7 +352,7 @@ async def run_agent_loop(
             # Thinking-400 recovery: strip stale thinking blocks and retry
             if ec == AgentErrorCode.API_THINKING_ERROR.value and thinking:
                 _state.thinking_consecutive_failures += 1
-                _clean_thinking_history(history.messages)
+                clean_thinking_history(history.messages)
                 if _state.thinking_consecutive_failures >= MAX_CONSECUTIVE_THINKING_FAILURES:
                     thinking = False
                     on_event(Recovery(label=label, message=f"Thinking failed {_state.thinking_consecutive_failures} times, disabling thinking."))
@@ -352,14 +360,11 @@ async def run_agent_loop(
                     on_event(Recovery(label=label, message=f"Stripping thinking blocks and retrying ({_state.thinking_consecutive_failures}/{MAX_CONSECUTIVE_THINKING_FAILURES})..."))
                 continue
 
-            # If still an error after recovery attempts, inject and continue/break
-            if response.is_error:
-                error_text = response.content[0].text if response.content else "Unknown error"
-                history.add_assistant([TextContent(text=error_text)])
-                on_event(ErrorEvent(label=label, error_text=error_text))
-                if ec == AgentErrorCode.API_AUTH_ERROR.value:
-                    break
-                continue
+            # No recovery matched — inject error message and continue
+            error_text = response.content[0].text if response.content else "Unknown error"
+            history.add_assistant([TextContent(text=error_text)])
+            on_event(ErrorEvent(label=label, error_text=error_text))
+            continue
 
         assert not response.is_error
         if _state.thinking_consecutive_failures > 0:
@@ -479,7 +484,7 @@ async def agent_loop(
         return [x for x in parts if x]
 
     history_copy = copy.copy(history)
-    memory_task = asyncio.create_task(_prepare_memory_context(user_input=user_input, history=history_copy))
+    memory_task = asyncio.create_task(prepare_memory_context(user_input=user_input, history=history_copy))
 
     # --- Task store: create if not already on state ---
     if state._task_store is None:
@@ -489,7 +494,7 @@ async def agent_loop(
     tool_use_context = ToolUseContext(
         messages=history,
         tools=tool_registry.list_names(),
-        permissions=_get_permission_engine(),
+        permissions=get_permission_engine(),
         file_state_cache=file_state_cache,
         task_store=state._task_store,
         denial_tracker=DenialTracker(),
@@ -605,90 +610,4 @@ def extract_text(content_blocks: list) -> str:
     return "\n".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Thinking helpers
-# ---------------------------------------------------------------------------
 
-
-def _clean_thinking_history(messages: list[Message]) -> None:
-    """In-place strip thinking blocks from message history."""
-    result: list[Message] = []
-    for msg in messages:
-        if msg.role != "assistant":
-            result.append(msg)
-            continue
-        content = msg.content
-        if not isinstance(content, list):
-            result.append(msg)
-            continue
-        filtered: list[ContentBlock] = [b for b in content if not isinstance(b, (ThinkingContent, RedactedThinkingContent))]
-        if not filtered:
-            continue
-        if len(filtered) < len(content):
-            msg.content = filtered
-        result.append(msg)
-    messages[:] = result
-
-
-# ---------------------------------------------------------------------------
-# Memory helpers
-# ---------------------------------------------------------------------------
-
-async def _read_memory_files(headers: list) -> list[str]:
-    """Read body content (without frontmatter) of selected memory files."""
-    from src.frontmatter import parse_frontmatter
-
-    def _read_sync() -> list[str]:
-        texts: list[str] = []
-        for h in headers:
-            try:
-                with open(h.file_path, "r", encoding="utf-8", errors="replace") as f:
-                    raw = f.read(4000)
-                _, body = parse_frontmatter(raw)
-                body = body.strip()
-                if body:
-                    texts.append(f"[{h.filename}]\n{body}")
-            except OSError:
-                continue
-        return texts
-
-    return await asyncio.to_thread(_read_sync)
-
-
-async def _prepare_memory_context(user_input: str, history: MessageHistory) -> Attachment|None:
-    """Select and read relevant memories (runs async, non-blocking)."""
-    mem_dir = get_memory_dir()
-
-    relevant_memories = await find_relevant_memories(user_input, mem_dir, history)
-    recalled_texts = await _read_memory_files(relevant_memories) if relevant_memories else []
-
-    if not recalled_texts:
-        return None
-
-    parts: list[str] = ["<memory-recalled>"]
-    parts.append("\n\n---\n\n".join(recalled_texts))
-    parts.append("</memory-recalled>")
-
-    memory_files = {"files": [h.file_path for h in relevant_memories]}
-    return Attachment(type="relevant_memories", content="\n".join(parts), metadata=memory_files)
-
-
-# ---------------------------------------------------------------------------
-# Permission engine singleton
-# ---------------------------------------------------------------------------
-
-_permission_engine = None
-
-
-def _get_permission_engine():
-    """Lazy-init singleton PermissionEngine with two-layer config."""
-    global _permission_engine
-    if _permission_engine is None:
-        from src.permissions import PermissionEngine
-        from src.core.config import get_permission_config_paths
-        user_config, project_config = get_permission_config_paths()
-        _permission_engine = PermissionEngine(
-            user_config=user_config,
-            project_config=project_config,
-        )
-    return _permission_engine

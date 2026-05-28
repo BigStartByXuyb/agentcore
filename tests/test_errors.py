@@ -165,6 +165,22 @@ class TestParsePtlTokenCounts:
         assert actual is None
         assert limit is None
 
+    def test_openai_format(self):
+        actual, limit = parse_ptl_token_counts(
+            "This model's maximum context length is 65536 tokens. "
+            "However, your messages resulted in 70000 tokens."
+        )
+        assert actual == 70000
+        assert limit == 65536
+
+    def test_openai_format_case_insensitive(self):
+        actual, limit = parse_ptl_token_counts(
+            "Maximum Context Length Is 32000 Tokens. "
+            "However, Your Messages Resulted In 40000 Tokens."
+        )
+        assert actual == 40000
+        assert limit == 32000
+
 
 class TestGetPtlTokenGap:
     def test_gap_calculation(self):
@@ -182,10 +198,11 @@ class TestGetPtlTokenGap:
         gap = get_ptl_token_gap(err)
         assert gap is None
 
-    def test_negative_gap_returns_none(self):
+    def test_swapped_numbers_still_yields_gap(self):
+        # Normalization always puts bigger number as actual
         err = Exception("prompt is too long: 100000 tokens > 128000")
         gap = get_ptl_token_gap(err)
-        assert gap is None
+        assert gap == 28000
 
 
 # =========================================================================

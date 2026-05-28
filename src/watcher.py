@@ -114,8 +114,8 @@ def _reload_mcp() -> None:
 
 
 def _reload_permissions() -> None:
-    import src.agent_loop as _al
-    engine = _al._permission_engine
+    from src.permissions import get_permission_engine
+    engine = get_permission_engine()
     if engine is not None:
         engine.reload()
         log.info("[watcher] Permissions reloaded.")

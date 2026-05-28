@@ -34,6 +34,15 @@ class StreamEvent:
     block: ProviderContentBlock | None = None
 
 
+@dataclass
+class StreamingFallbackEvent:
+    """Emitted by query_model_stream when streaming fails mid-way and
+    falls back to a non-streaming request. The consumer should discard
+    any partial state from the failed stream before processing subsequent
+    events (which come from the non-streaming response)."""
+    pass
+
+
 class ProviderStream(Protocol):
     """Async iterator of StreamEvent + final message accessor.
 
@@ -48,3 +57,37 @@ class ProviderStream(Protocol):
     async def get_final_message(self) -> ProviderMessage: ...
 
     async def close(self) -> None: ...
+
+
+class NonStreamingAsStream:
+    """Wraps a ProviderMessage as a ProviderStream-compatible async iterable.
+
+    Converts a non-streaming API response into the same StreamEvent sequence
+    that a real stream would produce, so both paths share the same consumer.
+    Unlike real streams, content_block_stop events already carry the block
+    (no snapshot lookup needed).
+    """
+
+    def __init__(self, message: ProviderMessage) -> None:
+        self._message = message
+
+    def __aiter__(self) -> AsyncIterator[StreamEvent]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[StreamEvent]:
+        for idx, block in enumerate(self._message.content):
+            if block.type == "text":
+                yield StreamEvent(type="text", text=block.text)
+            elif block.type == "thinking":
+                yield StreamEvent(type="thinking", thinking=block.thinking)
+            yield StreamEvent(type="content_block_stop", index=idx, block=block)
+
+    @property
+    def current_message_snapshot(self) -> ProviderMessage:
+        return self._message
+
+    async def get_final_message(self) -> ProviderMessage:
+        return self._message
+
+    async def close(self) -> None:
+        pass

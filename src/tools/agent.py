@@ -197,7 +197,9 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         on_event=context.on_event,
         file_state_cache=FileStateCache(),
         agent_state=AgentState(agent_id=label),
-        denial_tracker=DenialTracker(),
+        denial_tracker=DenialTracker(headless=bool(
+            context.permissions and context.permissions._headless
+        )),
     )
 
     try:

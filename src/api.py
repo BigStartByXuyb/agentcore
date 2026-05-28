@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, AsyncGenerator, Union
 from src.core import config
 from src.core.errors import classify_api_error, create_error_text
 from src.providers import get_provider
-from src.providers.stream import StreamEvent
+from src.providers.stream import (
+    StreamEvent, StreamingFallbackEvent, NonStreamingAsStream,
+)
 from src.providers.types import ProviderMessage, TextBlock
 from src.providers.retry import (
     with_retry,
@@ -30,10 +32,11 @@ from src.providers.retry import (
 
 if TYPE_CHECKING:
     from src.core.types import Message
+    from src.providers.stream import ProviderStream
 
 logger = logging.getLogger(__name__)
 
-StreamYield = Union[RetryEvent, StreamEvent, ProviderMessage]
+StreamYield = Union[RetryEvent, StreamEvent, StreamingFallbackEvent, ProviderMessage]
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +56,37 @@ def reset_client() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared stream consumer — used by both streaming and fallback paths
+# ---------------------------------------------------------------------------
+
+async def _iter_stream(
+    api_stream: ProviderStream,
+) -> AsyncGenerator[Union[StreamEvent, ProviderMessage], None]:
+    """Consume a ProviderStream, yielding StreamEvent + final ProviderMessage.
+
+    Handles two kinds of streams uniformly:
+      - Real streams (from open_stream): content_block_stop has block=None,
+        so we enrich it from current_message_snapshot.
+      - NonStreamingAsStream: content_block_stop already carries the block,
+        so we pass it through as-is.
+
+    The caller is responsible for closing the stream.
+    """
+    async for event in api_stream:
+        if event.type == "content_block_stop" and event.block is None:
+            snapshot = api_stream.current_message_snapshot
+            block = snapshot.content[event.index]
+            yield StreamEvent(
+                type="content_block_stop",
+                index=event.index,
+                block=block,
+            )
+        else:
+            yield event
+    yield await api_stream.get_final_message()
+
+
+# ---------------------------------------------------------------------------
 # Unified streaming entry — agent loop uses this
 # ---------------------------------------------------------------------------
 
@@ -68,56 +102,80 @@ async def query_model_stream(
 ) -> AsyncGenerator[StreamYield, None]:
     """Unified streaming entry point.
 
-    Never raises — all errors are yielded as ProviderMessage(is_error=True),
-    matching Claude Code's pattern where queryModel yields error messages
-    instead of throwing.
+    Never raises — all errors are yielded as ProviderMessage(is_error=True).
 
-    Two phases:
+    Uses a while loop with a ``streaming`` flag:
+      1. First pass: open_stream (real streaming)
+      2. If mid-stream failure: yield StreamingFallbackEvent, flip flag,
+         continue → second pass uses create_message wrapped as
+         NonStreamingAsStream (same ProviderStream interface)
+      3. Both passes share _iter_stream for consumption
 
-    Phase 1 — with_retry establishes the connection:
-      yields RetryEvent for each retry attempt (real-time notification)
-      yields the ProviderStream object on success
-
-    Phase 2 — iterate the stream:
-      yields StreamEvent (text/thinking deltas, content_block_stop with block)
-      yields ProviderMessage as the final item (success or error)
+    The yield of StreamingFallbackEvent pauses this generator. The consumer
+    (agent_loop) discards partial state, then resumes us at ``continue``.
     """
     adapter = get_provider(config.PROVIDER)
-    api_stream = None
+    api_stream: ProviderStream | None = None
+    streaming = True
 
     try:
-        # Phase 1: establish connection with retry
-        async for item in with_retry(
-            lambda: adapter.open_stream(
-                messages=messages, system=system, tools=tools,
-                model=model, max_tokens=max_tokens, thinking=thinking,
-            ),
-            is_retryable=adapter.is_retryable,
-            extract_retry_after=adapter.extract_retry_after,
-            connection_error_types=adapter.connection_error_types,
-            max_retries=max_retries,
-            label=adapter.label,
-        ):
-            if isinstance(item, RetryEvent):
-                yield item
-            else:
-                api_stream = item
+        # At most 2 iterations: streaming → fallback
+        while True:
+            try:
+                # --- Open connection (streaming or non-streaming) with retry ---
+                if streaming:
+                    open_fn = lambda: adapter.open_stream(
+                        messages=messages, system=system, tools=tools,
+                        model=model, max_tokens=max_tokens, thinking=thinking,
+                    )
+                    label = adapter.label
+                else:
+                    async def _open_nonstreaming():
+                        msg = await adapter.create_message(
+                            messages=messages, system=system, tools=tools,
+                            model=model, max_tokens=max_tokens, thinking=thinking,
+                        )
+                        return NonStreamingAsStream(msg)
 
-        assert api_stream is not None
+                    open_fn = _open_nonstreaming
+                    label = f"{adapter.label} (fallback)"
 
-        # Phase 2: iterate the stream
-        async for event in api_stream:
-            if event.type == "content_block_stop":
-                snapshot = api_stream.current_message_snapshot
-                block = snapshot.content[event.index]
-                yield StreamEvent(
-                    type="content_block_stop",
-                    index=event.index,
-                    block=block,
-                )
-            else:
-                yield event
-        yield await api_stream.get_final_message()
+                async for item in with_retry(
+                    open_fn,
+                    is_retryable=adapter.is_retryable,
+                    extract_retry_after=adapter.extract_retry_after,
+                    connection_error_types=adapter.connection_error_types,
+                    max_retries=max_retries,
+                    label=label,
+                ):
+                    if isinstance(item, RetryEvent):
+                        yield item
+                    else:
+                        api_stream = item
+
+                assert api_stream is not None
+
+                # --- Consume stream (same path for both types) ---
+                async for event in _iter_stream(api_stream):
+                    yield event
+                return  # success — exit generator
+
+            except Exception as e:
+                # Clean up broken stream
+                if api_stream is not None:
+                    try:
+                        await api_stream.close()
+                    except Exception:
+                        pass
+                    api_stream = None
+
+                if streaming and not config.DISABLE_STREAMING_FALLBACK:
+                    logger.warning("Streaming failed: %s; falling back to non-streaming", e)
+                    streaming = False
+                    yield StreamingFallbackEvent()
+                    continue  # generator pauses here; resumes at next while iteration
+
+                raise  # propagate to outer handler
 
     except Exception as e:
         logger.warning("API error in query_model_stream: %s", e)

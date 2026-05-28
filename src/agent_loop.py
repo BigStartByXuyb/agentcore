@@ -32,14 +32,14 @@ from src.core.types import (
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content, clean_thinking_history
 from src.messages import build_skill_reminder, build_agent_reminder, build_memory_index_reminder
-from src.tool_runner import StreamingToolExecutor, DenialAbortError, DenialTracker
+from src.tool_runner import StreamingToolExecutor, DenialTracker
 from src.permissions import get_permission_engine
 from src.tools import registry as tool_registry
 from src.api import query_model, query_model_stream
-from src.providers.stream import StreamEvent
+from src.providers.stream import StreamEvent, StreamingFallbackEvent
 from src.providers.types import ProviderMessage
 from src.providers.retry import RetryEvent
-from src.core.errors import create_error_text, AgentErrorCode
+from src.core.errors import AgentErrorCode
 from src.core.events import (
     AgentEvent, TextDelta, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
@@ -308,6 +308,12 @@ async def run_agent_loop(
                     attempt=item.attempt,
                     max_attempts=item.max_attempts,
                 ))
+            elif isinstance(item, StreamingFallbackEvent):
+                streaming_executor.discard()
+                streaming_executor = StreamingToolExecutor(label, tool_use_context, on_event)
+                _first_text = True
+                _first_thinking = True
+                on_event(Recovery(label=label, message="Streaming failed, falling back to non-streaming..."))
             elif isinstance(item, ProviderMessage):
                 response = item
             elif isinstance(item, StreamEvent):
@@ -387,33 +393,26 @@ async def run_agent_loop(
         history.add_assistant(assistant_content)
 
         # --- Execute tools (unified streaming path) ---
-        try:
-            assert streaming_executor is not None
-            if streaming_executor.has_tools():
-                tool_use_context = _apply_tool_results(
-                    streaming_executor.collect_results(),
-                    assistant_content, history, tool_use_context,
-                )
-                tool_names_used = [t.name for t in streaming_executor._tools]
-            else:
-                on_event(TokenUsage(
-                    label=label,
-                    input_tokens=_state.total_input_tokens,
-                    output_tokens=_state.total_output_tokens,
-                    thinking_tokens=_state.total_thinking_tokens,
-                ))
-                return extract_text(response.content)
-        except DenialAbortError as e:
-            # Inject synthetic error tool_results for all tool_use blocks
-            # so the message history stays valid (every tool_use needs a tool_result).
-            error_blocks: list[ToolResultContent] = []
-            _recover_orphan_tool_results(assistant_content, error_blocks)
-            if error_blocks:
-                history.add_tool_results(error_blocks)
-            error_text = create_error_text(e)
-            history.add_assistant([TextContent(text=error_text)])
-            on_event(ErrorEvent(label=label, error_text=error_text))
-            break
+        assert streaming_executor is not None
+        if streaming_executor.has_tools():
+            tool_use_context = _apply_tool_results(
+                streaming_executor.collect_results(),
+                assistant_content, history, tool_use_context,
+            )
+            tool_names_used = [t.name for t in streaming_executor._tools]
+
+            # Check denial abort flag after all tools completed
+            if tool_use_context.denial_tracker and tool_use_context.denial_tracker.abort_requested:
+                on_event(ErrorEvent(label=label, error_text=tool_use_context.denial_tracker.abort_message))
+                break
+        else:
+            on_event(TokenUsage(
+                label=label,
+                input_tokens=_state.total_input_tokens,
+                output_tokens=_state.total_output_tokens,
+                thinking_tokens=_state.total_thinking_tokens,
+            ))
+            return extract_text(response.content)
 
         # --- Shared post-tool logic (both paths) ---
         _state.messages_since_last_usage = len(history) - _msg_count_at_usage
@@ -491,13 +490,16 @@ async def agent_loop(
         state._task_store = TaskStore()
 
     system = build_system_prompt()
+    perm_engine = get_permission_engine()
     tool_use_context = ToolUseContext(
         messages=history,
         tools=tool_registry.list_names(),
-        permissions=get_permission_engine(),
+        permissions=perm_engine,
         file_state_cache=file_state_cache,
         task_store=state._task_store,
-        denial_tracker=DenialTracker(),
+        denial_tracker=DenialTracker(headless=bool(
+            perm_engine and perm_engine._headless
+        )),
     )
     tool_use_context.agent_state = state
 

@@ -106,6 +106,11 @@ def tokens_to_chars(tokens: int) -> int:
     return tokens * BYTES_PER_TOKEN
 
 
+# Streaming fallback — retry as non-streaming when stream breaks mid-way
+DISABLE_STREAMING_FALLBACK: bool = os.environ.get(
+    "DISABLE_STREAMING_FALLBACK", ""
+).lower() in ("1", "true")
+
 # Sandbox (bash command isolation via bubblewrap)
 SANDBOX_ENABLED: bool = True
 SANDBOX_ALLOW_WRITE: list[str] = []           # additional writable paths (project dir + /tmp always allowed)

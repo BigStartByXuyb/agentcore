@@ -77,7 +77,6 @@ async def run_tool_use(
             on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=perm.deny_message))
             if context.denial_tracker is not None:
                 context.denial_tracker.record_denial()
-                context.denial_tracker.check_abort()
             return (ToolResult(data=None), id, perm.deny_message, True)
 
         if perm.behavior == "ask":
@@ -127,6 +126,11 @@ async def run_tool_use(
 
         if context.denial_tracker is not None:
             context.denial_tracker.record_success()
+
+    except asyncio.CancelledError:
+        error_text = f"Tool '{tool_name}' was cancelled."
+        on_event(ToolEnd(label=label, is_error=True, tool_name=tool_name, result_summary=error_text))
+        return (ToolResult(data=None), id, error_text, True)
 
     except Exception as e:
         error_text = f"Tool '{tool_name}' executor failed: {type(e).__name__}: {e}"
@@ -272,6 +276,17 @@ class StreamingToolExecutor:
     def has_tools(self) -> bool:
         return len(self._tools) > 0
 
+    def discard(self) -> None:
+        """Cancel all in-flight tool tasks and clear the tool list.
+
+        Called when streaming fallback occurs — partial results from the
+        failed stream are invalid and must not be used.
+        """
+        for tracked in self._tools:
+            if tracked.task is not None and not tracked.task.done():
+                tracked.task.cancel()
+        self._tools.clear()
+
     def _maybe_start(self) -> None:
         for tracked in self._tools:
             if tracked.status != "queued":
@@ -321,19 +336,14 @@ class StreamingToolExecutor:
         #         break
 
     async def drain_remaining(self) -> None:
-        """Wait for all executing tools to complete. Cancel remaining on error."""
-        pending = [t.task for t in self._tools
-                   if t.task is not None and t.status == "executing"]
-        if not pending:
-            return
-        try:
-            await asyncio.gather(*pending)
-        except BaseException:
-            for t in pending:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            raise
+        """Wait for all tool tasks to complete, including ones started by _maybe_start
+        in a finishing task's finally block. Loops until no active tasks remain."""
+        while True:
+            active = [t.task for t in self._tools
+                      if t.task is not None and not t.task.done()]
+            if not active:
+                return
+            await asyncio.gather(*active, return_exceptions=True)
 
         # --- Ordered output version (Queue buffering) ---
         # for tracked in self._tools:
@@ -358,43 +368,42 @@ MAX_CONSECUTIVE_DENIALS = 3
 MAX_TOTAL_DENIALS = 20
 
 
-class DenialAbortError(Exception):
-    """Raised when denial limits are exceeded — terminates the agent loop."""
-    pass
-
-
 class DenialTracker:
     """Tracks consecutive and total tool permission denials.
 
-    Mirrors Claude Code's denialTracking.ts:
-      - consecutiveDenials: global counter (not per-tool), reset on any success
-      - totalDenials: session counter, reset when total limit hit
-      - Exceeding either limit raises DenialAbortError
+    In interactive mode (headless=False): purely informational counting.
+    The loop never breaks — LLM sees the denial message and decides.
+
+    In headless mode (headless=True): sets abort_requested after limits
+    are exceeded, causing the agent loop to terminate. This prevents
+    infinite retry loops in unattended/CI environments.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, headless: bool = False) -> None:
         self.consecutive: int = 0
         self.total: int = 0
+        self.headless: bool = headless
+        self.abort_requested: bool = False
+        self.abort_message: str = ""
 
     def record_denial(self) -> None:
         self.consecutive += 1
         self.total += 1
+        if not self.headless:
+            return
+        if self.consecutive >= MAX_CONSECUTIVE_DENIALS:
+            self.abort_requested = True
+            self.abort_message = (
+                f"Too many consecutive permission denials ({self.consecutive}). Aborting agent."
+            )
+        elif self.total >= MAX_TOTAL_DENIALS:
+            self.abort_requested = True
+            self.abort_message = (
+                f"Too many total permission denials ({MAX_TOTAL_DENIALS}). Aborting agent."
+            )
 
     def record_success(self) -> None:
         self.consecutive = 0
-
-    def check_abort(self) -> None:
-        """Raise DenialAbortError if limits exceeded."""
-        if self.consecutive >= MAX_CONSECUTIVE_DENIALS:
-            raise DenialAbortError(
-                f"Too many consecutive permission denials ({self.consecutive}). Aborting agent."
-            )
-        if self.total >= MAX_TOTAL_DENIALS:
-            self.total = 0
-            self.consecutive = 0
-            raise DenialAbortError(
-                f"Too many total permission denials ({MAX_TOTAL_DENIALS}). Aborting agent."
-            )
 
 
 # ---------------------------------------------------------------------------

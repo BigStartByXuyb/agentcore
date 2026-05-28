@@ -4,7 +4,7 @@ Covers:
   - config defaults
   - _serialize_content() handling of thinking blocks
   - _build_thinking_dict() logic (Anthropic adapter)
-  - _is_thinking_400() detection
+  - classify_api_error → API_THINKING_ERROR detection
   - _clean_thinking_history() in-place cleanup
   - strip_thinking_blocks() / filter_orphaned_thinking_messages()
   - ThinkingBlock event display via default_handler
@@ -28,10 +28,10 @@ from src.messages import (
 )
 from src.agent_loop import (
     _serialize_content,
-    _is_thinking_400,
     _clean_thinking_history,
     run_agent_loop,
 )
+from src.core.errors import classify_api_error, AgentErrorCode
 from src.display import default_handler
 from src.core.events import ThinkingBlock
 
@@ -143,36 +143,36 @@ class TestBuildThinkingDict:
 
 
 # ===================================================================
-# _is_thinking_400
+# classify_api_error → API_THINKING_ERROR
 # ===================================================================
 
-class TestIsThinking400:
+class TestThinkingErrorClassification:
     def test_invalid_signature(self):
         from anthropic import APIError
         err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
         err.status_code = 400
-        assert _is_thinking_400(err) is True
+        assert classify_api_error(err) == AgentErrorCode.API_THINKING_ERROR
 
     def test_thinking_cannot_be_modified(self):
         from anthropic import APIError
         err = APIError(message="thinking blocks cannot be modified", request=MagicMock(), body=None)
         err.status_code = 400
-        assert _is_thinking_400(err) is True
+        assert classify_api_error(err) == AgentErrorCode.API_THINKING_ERROR
 
     def test_non_400_error(self):
         from anthropic import APIError
         err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
         err.status_code = 500
-        assert _is_thinking_400(err) is False
+        assert classify_api_error(err) == AgentErrorCode.API_SERVER_ERROR
 
     def test_400_unrelated_message(self):
         from anthropic import APIError
         err = APIError(message="malformed request body", request=MagicMock(), body=None)
         err.status_code = 400
-        assert _is_thinking_400(err) is False
+        assert classify_api_error(err) == AgentErrorCode.API_BAD_REQUEST
 
     def test_non_api_error(self):
-        assert _is_thinking_400(ValueError("something")) is False
+        assert classify_api_error(ValueError("something")) == AgentErrorCode.API_UNKNOWN
 
 
 # ===================================================================
@@ -338,14 +338,10 @@ class TestThinkingRecovery:
     """Test that run_agent_loop strips thinking blocks on thinking-related 400."""
 
     def test_thinking_400_triggers_strip_and_retry(self):
-        from anthropic import APIError
         from src.core.types import ToolUseContext, MessageHistory
         from src.providers.stream import StreamEvent
         from src.providers.types import ProviderMessage, TextBlock, Usage
         import asyncio
-
-        err = APIError(message="invalid signature in thinking block", request=MagicMock(), body=None)
-        err.status_code = 400
 
         call_count = 0
 
@@ -353,8 +349,12 @@ class TestThinkingRecovery:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise err
-                yield  # noqa: E501
+                yield ProviderMessage(
+                    content=[TextBlock(text="invalid signature in thinking block")],
+                    stop_reason="error",
+                    is_error=True,
+                    error_code=AgentErrorCode.API_THINKING_ERROR.value,
+                )
             else:
                 yield StreamEvent(type="text", text="recovered")
                 yield ProviderMessage(
@@ -378,16 +378,17 @@ class TestThinkingRecovery:
         assert call_count == 2
 
     def test_non_thinking_400_not_recovered(self):
-        from anthropic import APIError
         from src.core.types import ToolUseContext, MessageHistory
+        from src.providers.types import ProviderMessage, TextBlock
         import asyncio
 
-        err = APIError(message="malformed request", request=MagicMock(), body=None)
-        err.status_code = 400
-
         async def mock_stream(**kwargs):
-            raise err
-            yield  # noqa: E501
+            yield ProviderMessage(
+                content=[TextBlock(text="malformed request")],
+                stop_reason="error",
+                is_error=True,
+                error_code=AgentErrorCode.API_BAD_REQUEST.value,
+            )
 
         history = MessageHistory([Message(role="user", content="test")])
         ctx = ToolUseContext(messages=history, tools=["bash"])

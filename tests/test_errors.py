@@ -381,19 +381,24 @@ class TestRecoverOrphanToolResults:
 
 class TestAgentLoopApiErrorRecovery:
     def test_api_error_injects_synthetic_message(self):
-        """When query_model_stream raises, agent_loop injects a synthetic error
-        message and continues the loop until max_turns."""
+        """When query_model_stream yields an error ProviderMessage, agent_loop
+        injects a synthetic error message and continues until max_turns."""
         import asyncio
         from src.agent_loop import run_agent_loop
         from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
+        from src.providers.types import ProviderMessage, TextBlock
 
         call_count = 0
 
         async def mock_stream(**kwargs):
             nonlocal call_count
             call_count += 1
-            raise APIConnectionError(request=MagicMock())
-            yield  # make it an async generator # noqa: E501
+            yield ProviderMessage(
+                content=[TextBlock(text="Connection error.")],
+                stop_reason="error",
+                is_error=True,
+                error_code="api_connection_error",
+            )
 
         history = MessageHistory([Message(role="user", content="hello")])
         with patch("src.agent_loop.query_model_stream", mock_stream):
@@ -417,14 +422,19 @@ class TestAgentLoopApiErrorRecovery:
         import asyncio
         from src.agent_loop import run_agent_loop
         from src.core.types import ToolUseContext, AgentState, MessageHistory, Message
+        from src.providers.types import ProviderMessage, TextBlock
 
         call_count = 0
 
         async def mock_stream(**kwargs):
             nonlocal call_count
             call_count += 1
-            raise Exception("unexpected boom")
-            yield  # make it an async generator # noqa: E501
+            yield ProviderMessage(
+                content=[TextBlock(text="Unexpected error.")],
+                stop_reason="error",
+                is_error=True,
+                error_code="api_unknown",
+            )
 
         history = MessageHistory([Message(role="user", content="test")])
         with patch("src.agent_loop.query_model_stream", mock_stream):

@@ -38,7 +38,7 @@ from src.api import query_model, query_model_stream
 from src.providers.stream import StreamEvent
 from src.providers.types import ProviderMessage
 from src.providers.retry import RetryEvent
-from src.core.errors import create_assistant_error_message, is_prompt_too_long
+from src.core.errors import create_error_text, AgentErrorCode
 from src.core.events import (
     AgentEvent, TextDelta, ThinkingDelta,
     ErrorEvent, Recovery, TokenUsage, RetryNotice,
@@ -288,58 +288,46 @@ async def run_agent_loop(
         )
 
         # --- Call LLM ---
-        streaming_executor: StreamingToolExecutor | None = None
-
-        async def _call_llm() -> ProviderMessage:
-            nonlocal streaming_executor
-            streaming_executor = StreamingToolExecutor(label, tool_use_context, on_event)
-            _first_text = True
-            _first_thinking = True
-            final_message: ProviderMessage | None = None
-
-            async for item in query_model_stream(
-                messages=history.prepare_messages(),
-                system=system_prompt, tools=tools,
-                thinking=thinking,
-            ):
-                if isinstance(item, RetryEvent):
-                    on_event(RetryNotice(
-                        label=label,
-                        delay=item.delay,
-                        attempt=item.attempt,
-                        max_attempts=item.max_attempts,
-                    ))
-                elif isinstance(item, ProviderMessage):
-                    final_message = item
-                elif isinstance(item, StreamEvent):
-                    if item.type == "text":
-                        on_event(TextDelta(label=label, delta=item.text, first=_first_text))
-                        _first_text = False
-                    elif item.type == "thinking":
-                        on_event(ThinkingDelta(label=label, delta=item.thinking, first=_first_thinking))
-                        _first_thinking = False
-                    elif item.type == "content_block_stop" and item.block:
-                        if item.block.type == "tool_use":
-                            streaming_executor.add_tool(item.block)
-                            await streaming_executor.drain_completed()
-
-            await streaming_executor.drain_remaining()
-            assert final_message is not None
-            return final_message
-
-        def _emit_error(err: Exception) -> None:
-            """Inject error into history and emit ErrorEvent."""
-            error_msg = create_assistant_error_message(err)
-            error_text = error_msg["content"][0]["text"]
-            history.add_assistant([TextContent(text=error_text)])
-            on_event(ErrorEvent(label=label, error_text=error_text))
-
+        streaming_executor = StreamingToolExecutor(label, tool_use_context, on_event)
+        _first_text = True
+        _first_thinking = True
         response: ProviderMessage | None = None
-        try:
-            response = await _call_llm()
-        except Exception as api_error:
+
+        async for item in query_model_stream(
+            messages=history.prepare_messages(),
+            system=system_prompt, tools=tools,
+            thinking=thinking,
+        ):
+            if isinstance(item, RetryEvent):
+                on_event(RetryNotice(
+                    label=label,
+                    delay=item.delay,
+                    attempt=item.attempt,
+                    max_attempts=item.max_attempts,
+                ))
+            elif isinstance(item, ProviderMessage):
+                response = item
+            elif isinstance(item, StreamEvent):
+                if item.type == "text":
+                    on_event(TextDelta(label=label, delta=item.text, first=_first_text))
+                    _first_text = False
+                elif item.type == "thinking":
+                    on_event(ThinkingDelta(label=label, delta=item.thinking, first=_first_thinking))
+                    _first_thinking = False
+                elif item.type == "content_block_stop" and item.block:
+                    if item.block.type == "tool_use":
+                        streaming_executor.add_tool(item.block)
+                        await streaming_executor.drain_completed()
+
+        await streaming_executor.drain_remaining()
+        assert response is not None
+
+        # --- Handle error responses (all decisions via error_code, not raw exception) ---
+        if response.is_error:
+            ec = response.error_code
+
             # Layer 3: reactive compact on prompt_too_long (bypasses circuit breaker)
-            if is_prompt_too_long(api_error):
+            if ec == AgentErrorCode.API_PROMPT_TOO_LONG.value:
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
                 file_snapshot = cache.snapshot() if cache is not None else {}
                 if await auto_compact(history):
@@ -351,25 +339,33 @@ async def run_agent_loop(
                 else:
                     _state.compact_consecutive_failures += 1
 
-            final_error: Exception | None = api_error
-            if _is_thinking_400(api_error) and thinking:
+            # Thinking-400 recovery: strip thinking blocks and retry
+            if ec == AgentErrorCode.API_THINKING_ERROR.value and thinking:
                 on_event(Recovery(label=label, message="Stripping thinking blocks and retrying..."))
                 _clean_thinking_history(history.messages)
-                try:
-                    response = await _call_llm()
-                    final_error = None
-                except Exception as retry_error:
-                    final_error = retry_error
+                retry_response: ProviderMessage | None = None
+                async for item in query_model_stream(
+                    messages=history.prepare_messages(),
+                    system=system_prompt, tools=tools,
+                    thinking=thinking,
+                ):
+                    if isinstance(item, ProviderMessage):
+                        retry_response = item
+                if retry_response is not None and not retry_response.is_error:
+                    response = retry_response
+                elif retry_response is not None:
+                    response = retry_response
 
-            if final_error is not None:
-                _emit_error(final_error)
-                if _is_fatal_error(final_error):
+            # If still an error after recovery attempts, inject and continue/break
+            if response.is_error:
+                error_text = response.content[0].text if response.content else "Unknown error"
+                history.add_assistant([TextContent(text=error_text)])
+                on_event(ErrorEvent(label=label, error_text=error_text))
+                if ec == AgentErrorCode.API_AUTH_ERROR.value:
                     break
                 continue
 
-        # Track token usage — response is guaranteed bound here:
-        # all error paths in the except block end with `continue`.
-        assert response is not None
+        assert not response.is_error
         _state.total_input_tokens += response.usage.input_tokens
         _state.total_output_tokens += response.usage.output_tokens
         thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
@@ -410,7 +406,9 @@ async def run_agent_loop(
             _recover_orphan_tool_results(assistant_content, error_blocks)
             if error_blocks:
                 history.add_tool_results(error_blocks)
-            _emit_error(e)
+            error_text = create_error_text(e)
+            history.add_assistant([TextContent(text=error_text)])
+            on_event(ErrorEvent(label=label, error_text=error_text))
             break
 
         # --- Shared post-tool logic (both paths) ---
@@ -616,44 +614,6 @@ def extract_text(content_blocks: list) -> str:
 # ---------------------------------------------------------------------------
 # Thinking helpers
 # ---------------------------------------------------------------------------
-
-def _is_fatal_error(error: Exception) -> bool:
-    """Check if an API error is non-recoverable (auth, permission, bad key).
-
-    These errors will persist no matter how many times we retry,
-    so the agent loop should break instead of continue.
-    """
-    from src.core.errors import classify_api_error, AgentErrorCode
-    code = classify_api_error(error)
-    return code in (AgentErrorCode.API_AUTH_ERROR,)
-
-
-
-def _is_thinking_400(error: Exception) -> bool:
-    """Check if an API error is a thinking-related 400 that can be recovered."""
-    status: int | None = None
-
-    try:
-        from anthropic import APIError as _AnthrAPIError
-        if isinstance(error, _AnthrAPIError):
-            status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    except ImportError:
-        pass
-
-    if status is None:
-        try:
-            from openai import APIError as _OaiAPIError
-            if isinstance(error, _OaiAPIError):
-                status = getattr(error, "status_code", None) or getattr(error, "status", None)
-        except ImportError:
-            pass
-
-    if status is None:
-        return False
-    if status != 400:
-        return False
-    msg = str(error).lower()
-    return "invalid signature" in msg or "thinking blocks cannot be modified" in msg
 
 
 def _clean_thinking_history(messages: list[Message]) -> None:

@@ -12,12 +12,14 @@ Corresponds to Claude Code's src/services/api/claude.ts:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, AsyncGenerator, Union
 
 from src.core import config
+from src.core.errors import classify_api_error, create_error_text
 from src.providers import get_provider
 from src.providers.stream import StreamEvent
-from src.providers.types import ProviderMessage
+from src.providers.types import ProviderMessage, TextBlock
 from src.providers.retry import (
     with_retry,
     RetryEvent,
@@ -28,6 +30,8 @@ from src.providers.retry import (
 
 if TYPE_CHECKING:
     from src.core.types import Message
+
+logger = logging.getLogger(__name__)
 
 StreamYield = Union[RetryEvent, StreamEvent, ProviderMessage]
 
@@ -64,7 +68,11 @@ async def query_model_stream(
 ) -> AsyncGenerator[StreamYield, None]:
     """Unified streaming entry point.
 
-    Two phases, matching Claude Code's queryModel pattern:
+    Never raises — all errors are yielded as ProviderMessage(is_error=True),
+    matching Claude Code's pattern where queryModel yields error messages
+    instead of throwing.
+
+    Two phases:
 
     Phase 1 — with_retry establishes the connection:
       yields RetryEvent for each retry attempt (real-time notification)
@@ -72,32 +80,32 @@ async def query_model_stream(
 
     Phase 2 — iterate the stream:
       yields StreamEvent (text/thinking deltas, content_block_stop with block)
-      yields ProviderMessage as the final item (complete response)
+      yields ProviderMessage as the final item (success or error)
     """
     adapter = get_provider(config.PROVIDER)
-
-    # Phase 1: establish connection with retry
     api_stream = None
-    async for item in with_retry(
-        lambda: adapter.open_stream(
-            messages=messages, system=system, tools=tools,
-            model=model, max_tokens=max_tokens, thinking=thinking,
-        ),
-        is_retryable=adapter.is_retryable,
-        extract_retry_after=adapter.extract_retry_after,
-        connection_error_types=adapter.connection_error_types,
-        max_retries=max_retries,
-        label=adapter.label,
-    ):
-        if isinstance(item, RetryEvent):
-            yield item
-        else:
-            api_stream = item
 
-    assert api_stream is not None
-
-    # Phase 2: iterate the stream
     try:
+        # Phase 1: establish connection with retry
+        async for item in with_retry(
+            lambda: adapter.open_stream(
+                messages=messages, system=system, tools=tools,
+                model=model, max_tokens=max_tokens, thinking=thinking,
+            ),
+            is_retryable=adapter.is_retryable,
+            extract_retry_after=adapter.extract_retry_after,
+            connection_error_types=adapter.connection_error_types,
+            max_retries=max_retries,
+            label=adapter.label,
+        ):
+            if isinstance(item, RetryEvent):
+                yield item
+            else:
+                api_stream = item
+
+        assert api_stream is not None
+
+        # Phase 2: iterate the stream
         async for event in api_stream:
             if event.type == "content_block_stop":
                 snapshot = api_stream.current_message_snapshot
@@ -110,8 +118,21 @@ async def query_model_stream(
             else:
                 yield event
         yield await api_stream.get_final_message()
+
+    except Exception as e:
+        logger.warning("API error in query_model_stream: %s", e)
+        error_code = classify_api_error(e)
+        yield ProviderMessage(
+            content=[TextBlock(text=create_error_text(e))],
+            stop_reason="error",
+            is_error=True,
+            error=e,
+            error_code=error_code.value,
+        )
+
     finally:
-        await api_stream.close()
+        if api_stream is not None:
+            await api_stream.close()
 
 
 # ---------------------------------------------------------------------------

@@ -270,7 +270,7 @@ class MessageHistory:
         self._messages.extend(new_messages)
 
     def prepare_messages(self) -> list[Message]:
-        """Expand attachments + merge consecutive same-role messages.
+        """Expand attachments + normalize for API safety.
 
         Returns a NEW list[Message] ready for per-adapter format conversion.
         No ContentBlock → dict conversion is done here — that's the adapter's job.
@@ -291,22 +291,7 @@ class MessageHistory:
                 timestamp=msg.timestamp,
             ))
 
-        result: list[Message] = [expanded[0]]
-        for m in expanded[1:]:
-            prev = result[-1]
-            if m.role == prev.role:
-                prev_blocks = _normalize_content_blocks(prev.content)
-                cur_blocks = _normalize_content_blocks(m.content)
-                merged = _join_content_blocks(prev_blocks, cur_blocks)
-                result[-1] = Message(
-                    role=prev.role,
-                    content=merged,
-                    msg_type=prev.msg_type,
-                    timestamp=prev.timestamp,
-                )
-            else:
-                result.append(m)
-        return result
+        return _normalize_for_api(expanded)
 
     # -- persistence --------------------------------------------------------
 
@@ -524,9 +509,8 @@ class ToolDef:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers for MessageHistory.normalized_for_api()
+# Module-level helpers for MessageHistory.prepare_messages()
 # ---------------------------------------------------------------------------
-# ContentBlock-level helpers for MessageHistory.prepare_messages()
 # ---------------------------------------------------------------------------
 
 def _normalize_content_blocks(content: str | list[ContentBlock]) -> list[ContentBlock]:
@@ -560,6 +544,167 @@ def _join_content_blocks(a: list[ContentBlock], b: list[ContentBlock]) -> list[C
         patched_last = TextContent(text=last_a.text + "\n")
         return [*a[:-1], patched_last, *b]
     return [*a, *b]
+
+
+# ---------------------------------------------------------------------------
+# Pre-send normalization — ensures messages are API-safe
+# ---------------------------------------------------------------------------
+
+def _is_thinking(block: ContentBlock) -> bool:
+    return isinstance(block, (ThinkingContent, RedactedThinkingContent))
+
+
+def _filter_orphaned_thinking_messages(messages: list[Message]) -> list[Message]:
+    """Remove assistant messages that contain ONLY thinking blocks.
+
+    Orphaned thinking-only messages arise from streaming interrupts or
+    compaction slicing. Their signatures are almost certainly stale, causing
+    "thinking blocks cannot be modified" 400 errors.
+    """
+    result: list[Message] = []
+    for msg in messages:
+        if msg.role != "assistant":
+            result.append(msg)
+            continue
+        blocks = _normalize_content_blocks(msg.content)
+        if any(not _is_thinking(b) for b in blocks):
+            result.append(msg)
+        # else: empty or all-thinking → drop
+    return result
+
+
+def _strip_trailing_thinking(messages: list[Message]) -> list[Message]:
+    """Remove trailing thinking blocks from the last assistant message.
+
+    The API does not allow assistant messages to end with thinking/redacted_thinking.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    if last.role != "assistant":
+        return messages
+    blocks = _normalize_content_blocks(last.content)
+    if not blocks:
+        return messages[:-1]  # empty assistant → remove
+    if not _is_thinking(blocks[-1]):
+        return messages  # last block is not thinking → nothing to strip
+
+    trimmed: list[ContentBlock] = []
+    for b in reversed(blocks):
+        if not trimmed and _is_thinking(b):
+            continue
+        trimmed.insert(0, b)
+
+    if not trimmed:
+        return messages[:-1]
+
+    patched = Message(
+        role=last.role, content=trimmed,
+        msg_type=last.msg_type, timestamp=last.timestamp,
+    )
+    return [*messages[:-1], patched]
+
+
+def _ensure_tool_result_pairing(messages: list[Message]) -> list[Message]:
+    """Ensure every tool_use block has a matching tool_result.
+
+    Scans (assistant, user) pairs. If a tool_use in the assistant has no
+    matching tool_result in the following user message, a synthetic error
+    tool_result is appended.
+    """
+    result = list(messages)
+    for i in range(len(result) - 1):
+        asst = result[i]
+        following = result[i + 1]
+        if asst.role != "assistant" or following.role != "user":
+            continue
+
+        asst_blocks = _normalize_content_blocks(asst.content)
+        foll_blocks = _normalize_content_blocks(following.content)
+
+        expected_ids = {
+            b.id for b in asst_blocks if isinstance(b, ToolUseContent)
+        }
+        if not expected_ids:
+            continue
+
+        seen_ids = {
+            b.tool_use_id for b in foll_blocks if isinstance(b, ToolResultContent)
+        }
+        missing = expected_ids - seen_ids
+        if not missing:
+            continue
+
+        new_blocks = list(foll_blocks)
+        for mid in missing:
+            new_blocks.append(ToolResultContent(
+                tool_use_id=mid,
+                content="<tool_use_error>Tool execution was interrupted.</tool_use_error>",
+                is_error=True,
+            ))
+        result[i + 1] = Message(
+            role=following.role, content=new_blocks,
+            msg_type=following.msg_type, timestamp=following.timestamp,
+        )
+    return result
+
+
+def _filter_empty_assistants(messages: list[Message]) -> list[Message]:
+    """Remove assistant messages with empty or whitespace-only content."""
+    result: list[Message] = []
+    for msg in messages:
+        if msg.role != "assistant":
+            result.append(msg)
+            continue
+        blocks = _normalize_content_blocks(msg.content)
+        if not blocks:
+            continue
+        has_substance = any(
+            not isinstance(b, TextContent) or b.text.strip()
+            for b in blocks
+        )
+        if has_substance:
+            result.append(msg)
+    return result
+
+
+def _merge_adjacent_same_role(messages: list[Message]) -> list[Message]:
+    """Re-merge consecutive same-role messages created by prior filter passes."""
+    if not messages:
+        return messages
+    result: list[Message] = [messages[0]]
+    for m in messages[1:]:
+        prev = result[-1]
+        if m.role == prev.role:
+            prev_blocks = _normalize_content_blocks(prev.content)
+            cur_blocks = _normalize_content_blocks(m.content)
+            joined = _join_content_blocks(prev_blocks, cur_blocks)
+            result[-1] = Message(
+                role=prev.role, content=joined,
+                msg_type=prev.msg_type, timestamp=prev.timestamp,
+            )
+        else:
+            result.append(m)
+    return result
+
+
+def _normalize_for_api(messages: list[Message]) -> list[Message]:
+    """Full normalization pipeline.
+
+    1. Merge adjacent same-role messages
+    2. Filter orphaned thinking-only / empty assistant messages
+    3. Strip trailing thinking blocks from last assistant
+    4. Filter empty assistant messages (may be created by step 3)
+    5. Re-merge adjacent same-role (steps 2-4 may create new adjacencies)
+    6. Ensure tool_use / tool_result pairing (must run after final merge)
+    """
+    result = _merge_adjacent_same_role(messages) # 消息合并，防止连续类型的消息传递给llm    
+    result = _filter_orphaned_thinking_messages(result) # 删除只有thinking的block
+    result = _strip_trailing_thinking(result) # 删除最后一个assistant消息中结尾的thinking block
+    result = _filter_empty_assistants(result) # 删除assistant消息中内容为空或者只有空白的消息
+    result = _merge_adjacent_same_role(result) # 再次合并，前面几步可能会产生新的连续消息
+    result = _ensure_tool_result_pairing(result) ## 确保tool_use和tool_result的配对
+    return result
 
 @dataclass
 class ToolCall:

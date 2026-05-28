@@ -26,7 +26,9 @@ class AgentErrorCode(Enum):
     API_RATE_LIMIT = "api_rate_limit"        # 429
     API_OVERLOADED = "api_overloaded"         # 529
     API_AUTH_ERROR = "api_auth_error"         # 401/403
-    API_BAD_REQUEST = "api_bad_request"       # 400
+    API_BAD_REQUEST = "api_bad_request"       # 400 (generic)
+    API_PROMPT_TOO_LONG = "api_prompt_too_long"  # 400/413 with PTL keywords
+    API_THINKING_ERROR = "api_thinking_error"    # 400 with thinking-block keywords
     API_SERVER_ERROR = "api_server_error"     # 5xx
     API_UNKNOWN = "api_unknown"
 
@@ -40,8 +42,12 @@ class AgentErrorCode(Enum):
 # API error classification
 # ---------------------------------------------------------------------------
 
-def _classify_by_status(status: int | None) -> AgentErrorCode | None:
-    """Map HTTP status code to error code (shared by all providers)."""
+_PTL_KEYWORDS = ("prompt is too long", "prompt_too_long", "context_length_exceeded", "too many tokens")
+_THINKING_KEYWORDS = ("invalid signature", "thinking blocks cannot be modified")
+
+
+def _classify_by_status(status: int | None, error_msg: str = "") -> AgentErrorCode | None:
+    """Map HTTP status code + error message to error code (shared by all providers)."""
     if status is None:
         return None
     if status == 429:
@@ -50,7 +56,14 @@ def _classify_by_status(status: int | None) -> AgentErrorCode | None:
         return AgentErrorCode.API_OVERLOADED
     if status in (401, 403):
         return AgentErrorCode.API_AUTH_ERROR
+    if status == 413:
+        return AgentErrorCode.API_PROMPT_TOO_LONG
     if status == 400:
+        msg = error_msg.lower()
+        if any(kw in msg for kw in _PTL_KEYWORDS):
+            return AgentErrorCode.API_PROMPT_TOO_LONG
+        if any(kw in msg for kw in _THINKING_KEYWORDS):
+            return AgentErrorCode.API_THINKING_ERROR
         return AgentErrorCode.API_BAD_REQUEST
     if status >= 500:
         return AgentErrorCode.API_SERVER_ERROR
@@ -63,17 +76,19 @@ def classify_api_error(error: Exception) -> AgentErrorCode:
     Supports both Anthropic and OpenAI SDK exceptions.
     Falls back to keyword matching on str(error).
     """
+    error_msg = str(error)
+
     # --- Anthropic SDK ---
     try:
         from anthropic import APIError as AnthrAPIError, APIConnectionError as AnthrConnError
         if isinstance(error, AnthrConnError):
-            error_str = str(error).lower()
-            if "timeout" in error_str or "timed out" in error_str:
+            msg_lower = error_msg.lower()
+            if "timeout" in msg_lower or "timed out" in msg_lower:
                 return AgentErrorCode.API_TIMEOUT
             return AgentErrorCode.API_CONNECTION_ERROR
         if isinstance(error, AnthrAPIError):
             status = getattr(error, "status_code", None) or getattr(error, "status", None)
-            return _classify_by_status(status) or AgentErrorCode.API_UNKNOWN
+            return _classify_by_status(status, error_msg) or AgentErrorCode.API_UNKNOWN
     except ImportError:
         pass
 
@@ -81,22 +96,22 @@ def classify_api_error(error: Exception) -> AgentErrorCode:
     try:
         from openai import APIError as OaiAPIError, APIConnectionError as OaiConnError
         if isinstance(error, OaiConnError):
-            error_str = str(error).lower()
-            if "timeout" in error_str or "timed out" in error_str:
+            msg_lower = error_msg.lower()
+            if "timeout" in msg_lower or "timed out" in msg_lower:
                 return AgentErrorCode.API_TIMEOUT
             return AgentErrorCode.API_CONNECTION_ERROR
         if isinstance(error, OaiAPIError):
             status = getattr(error, "status_code", None) or getattr(error, "status", None)
-            return _classify_by_status(status) or AgentErrorCode.API_UNKNOWN
+            return _classify_by_status(status, error_msg) or AgentErrorCode.API_UNKNOWN
     except ImportError:
         pass
 
-    # --- Generic fallback ---
-    error_str = str(error).lower()
-    if "timeout" in error_str or "timed out" in error_str:
+    # --- Generic fallback (no SDK exception type matched) ---
+    msg_lower = error_msg.lower()
+    if "timeout" in msg_lower or "timed out" in msg_lower:
         return AgentErrorCode.API_TIMEOUT
-    if "context_length_exceeded" in error_str or "prompt is too long" in error_str:
-        return AgentErrorCode.API_BAD_REQUEST
+    if any(kw in msg_lower for kw in _PTL_KEYWORDS):
+        return AgentErrorCode.API_PROMPT_TOO_LONG
 
     return AgentErrorCode.API_UNKNOWN
 
@@ -131,6 +146,14 @@ _ERROR_MESSAGES: dict[AgentErrorCode, str] = {
         "This usually indicates a malformed request — "
         "the conversation context may need to be reset."
     ),
+    AgentErrorCode.API_PROMPT_TOO_LONG: (
+        "The prompt is too long and exceeds the model's context window. "
+        "The conversation will be compacted automatically."
+    ),
+    AgentErrorCode.API_THINKING_ERROR: (
+        "The API returned a thinking-related error (400). "
+        "Thinking blocks will be stripped and the request retried."
+    ),
     AgentErrorCode.API_SERVER_ERROR: (
         "The API returned a server error (5xx). "
         "This is a temporary issue — please try again."
@@ -142,36 +165,12 @@ _ERROR_MESSAGES: dict[AgentErrorCode, str] = {
 
 
 def is_prompt_too_long(error: Exception) -> bool:
-    """Detect prompt-too-long errors from any supported provider."""
-    status: int | None = None
+    """Detect prompt-too-long errors from any supported provider.
 
-    try:
-        from anthropic import APIError as _AnthrAPIError
-        if isinstance(error, _AnthrAPIError):
-            status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    except ImportError:
-        pass
-
-    if status is None:
-        try:
-            from openai import APIError as _OaiAPIError
-            if isinstance(error, _OaiAPIError):
-                status = getattr(error, "status_code", None) or getattr(error, "status", None)
-        except ImportError:
-            pass
-
-    if status is None:
-        msg = str(error).lower()
-        return ("prompt is too long" in msg or "prompt_too_long" in msg
-                or "context_length_exceeded" in msg)
-
-    if status == 413:
-        return True
-    if status == 400:
-        msg = str(error).lower()
-        return ("prompt is too long" in msg or "prompt_too_long" in msg
-                or "too many tokens" in msg or "context_length_exceeded" in msg)
-    return False
+    Delegates to classify_api_error for unified classification.
+    Kept as a convenience for callers that work with raw exceptions (e.g. auto_compact).
+    """
+    return classify_api_error(error) == AgentErrorCode.API_PROMPT_TOO_LONG
 
 
 _PTL_TOKEN_RE = re.compile(
@@ -205,6 +204,16 @@ def get_ptl_token_gap(error: Exception | str | None) -> int | None:
         return None
     gap = actual - limit
     return gap if gap > 0 else None
+
+
+def create_error_text(error: Exception) -> str:
+    """Build a human-readable error description from an exception.
+
+    Used by api.py to populate ProviderMessage(is_error=True) content.
+    """
+    code = classify_api_error(error)
+    base_msg = _ERROR_MESSAGES.get(code, _ERROR_MESSAGES[AgentErrorCode.API_UNKNOWN])
+    return f"{base_msg}\n\nError details: {type(error).__name__}: {error}"
 
 
 def create_assistant_error_message(error: Exception) -> dict:

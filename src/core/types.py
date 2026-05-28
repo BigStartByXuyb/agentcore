@@ -451,6 +451,7 @@ class AgentState:
     turns_since_task_write: int = 0
     turns_since_task_reminder: int = 0
     compact_consecutive_failures: int = 0
+    thinking_consecutive_failures: int = 0
     _task_store: Any | None = field(default=None, repr=False)
 
 
@@ -605,6 +606,23 @@ def _strip_trailing_thinking(messages: list[Message]) -> list[Message]:
     return [*messages[:-1], patched]
 
 
+def _make_missing_tool_results(
+    expected_ids: set[str],
+    existing_results: list[ToolResultContent],
+    error_message: str = "Tool execution was interrupted.",
+) -> list[ToolResultContent]:
+    """Return synthetic error tool_results for tool_use IDs not in existing_results."""
+    seen_ids = {r.tool_use_id for r in existing_results}
+    return [
+        ToolResultContent(
+            tool_use_id=mid,
+            content=f"<tool_use_error>{error_message}</tool_use_error>",
+            is_error=True,
+        )
+        for mid in expected_ids - seen_ids
+    ]
+
+
 def _ensure_tool_result_pairing(messages: list[Message]) -> list[Message]:
     """Ensure every tool_use block has a matching tool_result.
 
@@ -628,22 +646,13 @@ def _ensure_tool_result_pairing(messages: list[Message]) -> list[Message]:
         if not expected_ids:
             continue
 
-        seen_ids = {
-            b.tool_use_id for b in foll_blocks if isinstance(b, ToolResultContent)
-        }
-        missing = expected_ids - seen_ids
+        existing = [b for b in foll_blocks if isinstance(b, ToolResultContent)]
+        missing = _make_missing_tool_results(expected_ids, existing)
         if not missing:
             continue
 
-        new_blocks = list(foll_blocks)
-        for mid in missing:
-            new_blocks.append(ToolResultContent(
-                tool_use_id=mid,
-                content="<tool_use_error>Tool execution was interrupted.</tool_use_error>",
-                is_error=True,
-            ))
         result[i + 1] = Message(
-            role=following.role, content=new_blocks,
+            role=following.role, content=list(foll_blocks) + missing,
             msg_type=following.msg_type, timestamp=following.timestamp,
         )
     return result

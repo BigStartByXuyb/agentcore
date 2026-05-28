@@ -27,7 +27,7 @@ from src.core import config
 from src.core.types import (
     AgentState, Attachment, ContentBlock, EventCallback, Message, MessageHistory,
     TextContent, ThinkingContent, RedactedThinkingContent, ToolResultContent, ToolUseContent,
-    ToolUseContext,
+    ToolUseContext, _make_missing_tool_results,
 )
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
@@ -63,6 +63,7 @@ POST_COMPACT_MAX_FILES = 5
 POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000
 POST_COMPACT_FILES_TOKEN_BUDGET = 50_000
 TASK_REMINDER_INTERVAL = 10
+MAX_CONSECUTIVE_THINKING_FAILURES = 3
 
 
 def _build_invoked_skills_attachment(
@@ -196,6 +197,7 @@ async def run_agent_loop(
     The caller must set tool_use_context.agent_state before calling.
     """
     _state = tool_use_context.agent_state or AgentState(agent_id=label)
+    _thinking_original = thinking
     history = tool_use_context.messages
     _msg_count_at_usage = len(history)
 
@@ -339,22 +341,16 @@ async def run_agent_loop(
                 else:
                     _state.compact_consecutive_failures += 1
 
-            # Thinking-400 recovery: strip thinking blocks and retry
+            # Thinking-400 recovery: strip stale thinking blocks and retry
             if ec == AgentErrorCode.API_THINKING_ERROR.value and thinking:
-                on_event(Recovery(label=label, message="Stripping thinking blocks and retrying..."))
+                _state.thinking_consecutive_failures += 1
                 _clean_thinking_history(history.messages)
-                retry_response: ProviderMessage | None = None
-                async for item in query_model_stream(
-                    messages=history.prepare_messages(),
-                    system=system_prompt, tools=tools,
-                    thinking=thinking,
-                ):
-                    if isinstance(item, ProviderMessage):
-                        retry_response = item
-                if retry_response is not None and not retry_response.is_error:
-                    response = retry_response
-                elif retry_response is not None:
-                    response = retry_response
+                if _state.thinking_consecutive_failures >= MAX_CONSECUTIVE_THINKING_FAILURES:
+                    thinking = False
+                    on_event(Recovery(label=label, message=f"Thinking failed {_state.thinking_consecutive_failures} times, disabling thinking."))
+                else:
+                    on_event(Recovery(label=label, message=f"Stripping thinking blocks and retrying ({_state.thinking_consecutive_failures}/{MAX_CONSECUTIVE_THINKING_FAILURES})..."))
+                continue
 
             # If still an error after recovery attempts, inject and continue/break
             if response.is_error:
@@ -366,6 +362,9 @@ async def run_agent_loop(
                 continue
 
         assert not response.is_error
+        if _state.thinking_consecutive_failures > 0:
+            _state.thinking_consecutive_failures = 0
+            thinking = _thinking_original
         _state.total_input_tokens += response.usage.input_tokens
         _state.total_output_tokens += response.usage.output_tokens
         thinking_tokens = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
@@ -544,15 +543,10 @@ def _recover_orphan_tool_results(
         for block in assistant_content
         if isinstance(block, ToolUseContent)
     }
-    seen_ids = {block.tool_use_id for block in tool_result_blocks}
-    for missing_id in expected_ids - seen_ids:
-        tool_result_blocks.append(
-            build_tool_result_content(
-                missing_id,
-                "Tool execution was interrupted before this tool could run.",
-                is_error=True,
-            )
-        )
+    tool_result_blocks.extend(_make_missing_tool_results(
+        expected_ids, tool_result_blocks,
+        error_message="Tool execution was interrupted before this tool could run.",
+    ))
 
 
 def _apply_tool_results(

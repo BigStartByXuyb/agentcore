@@ -78,7 +78,10 @@ async def find_relevant_memories(
             max_tokens=256,
         )
 
-        # Extract text from response
+        if response.is_error:
+            logger.debug("find_relevant_memories: LLM call failed: %s", response.error_code)
+            return []
+
         text_block = next(
             (b for b in response.content if b.type == "text"),
             None,

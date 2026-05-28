@@ -27,7 +27,7 @@ from src.core import config
 from src.core.types import (
     AgentState, Attachment, ContentBlock, EventCallback, Message, MessageHistory,
     TextContent, ThinkingContent, RedactedThinkingContent, ToolResultContent, ToolUseContent,
-    ToolUseContext, _make_missing_tool_results,
+    ToolUseContext, make_missing_tool_results,
 )
 from src.system_prompt import build_system_prompt
 from src.messages import build_tool_schemas, build_tool_result_content
@@ -543,7 +543,7 @@ def _recover_orphan_tool_results(
         for block in assistant_content
         if isinstance(block, ToolUseContent)
     }
-    tool_result_blocks.extend(_make_missing_tool_results(
+    tool_result_blocks.extend(make_missing_tool_results(
         expected_ids, tool_result_blocks,
         error_message="Tool execution was interrupted before this tool could run.",
     ))

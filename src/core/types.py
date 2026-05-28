@@ -606,7 +606,7 @@ def _strip_trailing_thinking(messages: list[Message]) -> list[Message]:
     return [*messages[:-1], patched]
 
 
-def _make_missing_tool_results(
+def make_missing_tool_results(
     expected_ids: set[str],
     existing_results: list[ToolResultContent],
     error_message: str = "Tool execution was interrupted.",
@@ -647,7 +647,7 @@ def _ensure_tool_result_pairing(messages: list[Message]) -> list[Message]:
             continue
 
         existing = [b for b in foll_blocks if isinstance(b, ToolResultContent)]
-        missing = _make_missing_tool_results(expected_ids, existing)
+        missing = make_missing_tool_results(expected_ids, existing)
         if not missing:
             continue
 

@@ -51,15 +51,19 @@ def _messages_to_prepared(messages: list[Message]) -> list[Message]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-async def auto_compact(history: MessageHistory) -> bool:
+async def auto_compact(parent_context: ToolUseContext) -> bool:
     """Full compact with truncate-head retry on prompt_too_long.
 
     Uses run_agent_loop as the unified LLM entry point (query_source="compact"
-    disables internal compaction to prevent recursion). Thinking fallback is
-    handled internally by run_agent_loop.
+    disables internal compaction to prevent recursion). Thinking is disabled
+    for compact (no need for deep reasoning, saves output tokens).
+
+    Reuses the parent's system_prompt for prompt cache prefix sharing.
+    The compact instruction is appended as a user message.
 
     Returns True if compaction was performed, False otherwise.
     """
+    history = parent_context.messages
     source_messages = list(history.messages)
     if not source_messages:
         return False
@@ -74,15 +78,19 @@ async def auto_compact(history: MessageHistory) -> bool:
         from src.agent_loop import run_agent_loop
 
         compact_history = MessageHistory(prepared)
-        compact_context = ToolUseContext(messages=compact_history, tools=[])
+        compact_history.add_user(compact_prompt)
+        compact_context = ToolUseContext(
+            messages=compact_history,
+            tools=[],
+            system_prompt=parent_context.system_prompt,
+            label="compact",
+            thinking=False,
+        )
 
         result = await run_agent_loop(
-            system_prompt=compact_prompt,
             tool_use_context=compact_context,
             max_turns=1,
-            label="compact",
             query_source="compact",
-            thinking=config.THINKING_ENABLED,
             on_event=lambda _: None,
         )
 

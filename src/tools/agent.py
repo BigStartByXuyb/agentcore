@@ -191,6 +191,8 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
     sub_context = ToolUseContext(
         messages=sub_history,
         tools=sub_tool_names,
+        system_prompt=system_prompt,
+        label=label,
         depth=context.depth + 1,
         abort_signal=context.abort_signal,
         permissions=context.permissions,
@@ -206,10 +208,8 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         from src.agent_loop import run_agent_loop
 
         result = await run_agent_loop(
-            system_prompt=system_prompt,
             tool_use_context=sub_context,
             max_turns=agent_def.max_turns,
-            label=label,
             query_source="subagent",
             on_event=context.on_event,
         )

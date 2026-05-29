@@ -17,11 +17,13 @@ import os
 import sys
 from unittest.mock import patch, MagicMock
 
+from src.core.types import LoopResult
+
 
 def _mock_run_agent_loop(return_value):
     """Return a side_effect coroutine function that returns the given value."""
     async def _side_effect(*args, **kwargs):
-        return return_value
+        return LoopResult(reason="completed", text=return_value)
     return _side_effect
 
 
@@ -348,12 +350,14 @@ def test_skill_executor_fork_basic():
     # Verify run_agent_loop was called with correct params
     mock_loop.assert_called_once()
     call_kwargs = mock_loop.call_args[1]
-    assert call_kwargs["label"] == "fork:fork-test"
-    assert call_kwargs["system_prompt"].startswith("You are a sub-agent")
-    assert "Do NOT spawn sub-agents" in call_kwargs["system_prompt"]
+
+    # label, system_prompt now live in tool_use_context
+    sub_ctx = call_kwargs["tool_use_context"]
+    assert sub_ctx.label == "fork:fork-test"
+    assert sub_ctx.system_prompt.startswith("You are a sub-agent")
+    assert "Do NOT spawn sub-agents" in sub_ctx.system_prompt
 
     # Initial messages should contain skill content
-    sub_ctx = call_kwargs["tool_use_context"]
     initial_msgs = sub_ctx.messages.messages
     assert len(initial_msgs) >= 1
     assert "<skill-content name='fork-test'>" in initial_msgs[0].content

@@ -157,6 +157,8 @@ async def run_memory_extraction(
     tool_use_context = ToolUseContext(
         messages=extraction_history,
         tools=["read_file", "write_file"],
+        system_prompt=system_prompt,
+        label="memory-extraction",
         depth=1,
         tool_overrides={"write_file": restricted_write},
         on_event=cb,
@@ -167,10 +169,8 @@ async def run_memory_extraction(
         from src.agent_loop import run_agent_loop
 
         result = await run_agent_loop(
-            system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=5,
-            label="memory-extraction",
             query_source="memory",
             on_event=cb,
         )

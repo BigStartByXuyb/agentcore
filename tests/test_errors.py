@@ -420,14 +420,13 @@ class TestAgentLoopApiErrorRecovery:
         history = MessageHistory([Message(role="user", content="hello")])
         with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
-                system_prompt="test",
-                tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
+                tool_use_context=ToolUseContext(messages=history, tools=[], system_prompt="test", label="test", agent_state=AgentState(agent_id="test")),
                 max_turns=3,
-                label="test",
                 on_event=lambda _: None,
             ))
 
-        assert "max turns" in result.lower()
+        assert result.reason == "max_turns"
+        assert "max turns" in result.text.lower()
         assert call_count >= 1
         assert len(history.messages) > 1
         error_msgs = [m for m in history.messages if m.role == "assistant"]
@@ -456,12 +455,11 @@ class TestAgentLoopApiErrorRecovery:
         history = MessageHistory([Message(role="user", content="test")])
         with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
-                system_prompt="test",
-                tool_use_context=ToolUseContext(messages=history, tools=[], agent_state=AgentState(agent_id="test")),
+                tool_use_context=ToolUseContext(messages=history, tools=[], system_prompt="test", label="test", agent_state=AgentState(agent_id="test")),
                 max_turns=2,
-                label="test",
                 on_event=lambda _: None,
             ))
 
         assert call_count >= 1
-        assert "max turns" in result.lower()
+        assert result.reason == "max_turns"
+        assert "max turns" in result.text.lower()

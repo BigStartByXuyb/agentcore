@@ -182,12 +182,9 @@ def _reinject_after_compact(
 async def run_agent_loop(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
-    system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
-    label: str = "main",
     query_source: str = "main",
-    thinking: bool = False,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
 ) -> LoopResult:
@@ -203,12 +200,9 @@ async def run_agent_loop(
     try:
         return await _run_agent_loop_inner(
             memory_task=memory_task,
-            system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=max_turns,
-            label=label,
             query_source=query_source,
-            thinking=thinking,
             on_event=on_event,
             on_compact_rebuild=on_compact_rebuild,
         )
@@ -220,12 +214,9 @@ async def run_agent_loop(
 async def _run_agent_loop_inner(
     *,
     memory_task: asyncio.Task[Attachment | None] | None = None,
-    system_prompt: str,
     tool_use_context: ToolUseContext,
     max_turns: int,
-    label: str = "main",
     query_source: str = "main",
-    thinking: bool = False,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
 ) -> LoopResult:
@@ -233,8 +224,11 @@ async def _run_agent_loop_inner(
 
     _skip_compaction = query_source in ("compact", "memory")
     if tool_use_context.agent_state is None:
-        tool_use_context.agent_state = AgentState(agent_id=label)
+        tool_use_context.agent_state = AgentState(agent_id=tool_use_context.label)
     _state = tool_use_context.agent_state
+    system_prompt = tool_use_context.system_prompt
+    label = tool_use_context.label
+    thinking = tool_use_context.thinking
     _thinking_original = thinking
     history = tool_use_context.messages
     _msg_count_at_usage = len(history)
@@ -262,7 +256,7 @@ async def _run_agent_loop_inner(
                 else:
                     file_snapshot = cache.snapshot() if cache is not None else {}
                     try:
-                        ok = await auto_compact(history)
+                        ok = await auto_compact(tool_use_context)
                     except Exception:
                         ok = False
                     if ok:
@@ -390,7 +384,7 @@ async def _run_agent_loop_inner(
                     return LoopResult(reason="prompt_too_long", text=error_text)
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
                 file_snapshot = cache.snapshot() if cache is not None else {}
-                if await auto_compact(history):
+                if await auto_compact(tool_use_context):
                     _state.compact_consecutive_failures = 0
                     if cache is not None:
                         cache.clear()
@@ -538,6 +532,9 @@ async def agent_loop(
     tool_use_context = ToolUseContext(
         messages=history,
         tools=tool_registry.list_names(),
+        system_prompt=system,
+        label="main",
+        thinking=config.THINKING_ENABLED,
         permissions=perm_engine,
         file_state_cache=file_state_cache,
         task_store=state._task_store,
@@ -552,11 +549,8 @@ async def agent_loop(
     handler = make_interactive_handler(default_handler)
     result = await run_agent_loop(
         memory_task=memory_task,
-        system_prompt=system,
         tool_use_context=tool_use_context,
         max_turns=config.MAX_TURNS,
-        label="main",
-        thinking=config.THINKING_ENABLED,
         on_event=handler,
         on_compact_rebuild=_rebuild_after_compact,
     )

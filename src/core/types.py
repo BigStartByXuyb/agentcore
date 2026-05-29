@@ -330,6 +330,9 @@ class ToolUseContext:
 
     messages: MessageHistory
     tools: list[str]
+    system_prompt: str = ""
+    label: str = "main"
+    thinking: bool = False
     depth: int = 0
     abort_signal: bool = False
     tool_overrides: dict | None = None  # Optional: {name: ToolDef} overrides for registry lookup

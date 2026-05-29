@@ -14,11 +14,13 @@ import os
 import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from src.core.types import LoopResult
+
 
 def _mock_run_agent_loop(return_value):
     """Return a side_effect coroutine function that returns the given value."""
     async def _side_effect(*args, **kwargs):
-        return return_value
+        return LoopResult(reason="completed", text=return_value)
     return _side_effect
 
 
@@ -134,10 +136,11 @@ def test_executor_default_agent(mock_loop):
 
     # Verify run_agent_loop was called with correct params
     call_kwargs = mock_loop.call_args.kwargs
-    assert call_kwargs["system_prompt"] == _DEFAULT_AGENT.system_prompt
+    sub_ctx = call_kwargs["tool_use_context"]
+    assert sub_ctx.system_prompt == _DEFAULT_AGENT.system_prompt
     assert call_kwargs["max_turns"] == _DEFAULT_AGENT.max_turns
-    assert call_kwargs["tool_use_context"].depth == 1
-    assert call_kwargs["label"] == "agent:general-purpose"
+    assert sub_ctx.depth == 1
+    assert sub_ctx.label == "agent:general-purpose"
     print("  [PASS] test_executor_default_agent")
 
 
@@ -155,10 +158,11 @@ def test_executor_explore_agent(mock_loop):
     assert "entry point" in result.data["result"]
 
     call_kwargs = mock_loop.call_args.kwargs
-    assert call_kwargs["system_prompt"] == explore_agent.system_prompt
+    sub_ctx = call_kwargs["tool_use_context"]
+    assert sub_ctx.system_prompt == explore_agent.system_prompt
     assert call_kwargs["max_turns"] == 12
     # Explore gets its allowed tools via tool_use_context.tools
-    tool_names = call_kwargs["tool_use_context"].tools
+    tool_names = sub_ctx.tools
     assert "bash" in tool_names
     assert "read_file" in tool_names
     assert "grep" in tool_names

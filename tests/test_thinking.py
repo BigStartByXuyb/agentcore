@@ -253,17 +253,16 @@ class TestThinkingRecovery:
                 )
 
         history = MessageHistory([Message(role="user", content="test")])
-        ctx = ToolUseContext(messages=history, tools=["bash"])
+        ctx = ToolUseContext(messages=history, tools=["bash"], system_prompt="test", thinking=True)
 
         with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
-                system_prompt="test",
                 tool_use_context=ctx,
                 max_turns=3,
-                thinking=True,
                 on_event=lambda _: None,
             ))
-        assert result == "recovered"
+        assert result.reason == "completed"
+        assert result.text == "recovered"
         assert call_count == 2
 
     def test_non_thinking_400_not_recovered(self):
@@ -280,14 +279,13 @@ class TestThinkingRecovery:
             )
 
         history = MessageHistory([Message(role="user", content="test")])
-        ctx = ToolUseContext(messages=history, tools=["bash"])
+        ctx = ToolUseContext(messages=history, tools=["bash"], system_prompt="test", thinking=True)
 
         with patch("src.agent_loop.query_model_stream", mock_stream):
             result = asyncio.run(run_agent_loop(
-                system_prompt="test",
                 tool_use_context=ctx,
                 max_turns=3,
-                thinking=True,
                 on_event=lambda _: None,
             ))
-        assert "max turns" in result.lower()
+        assert result.reason == "max_turns"
+        assert "max turns" in result.text.lower()

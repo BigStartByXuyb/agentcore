@@ -1,7 +1,7 @@
 """Tests for auto-compact circuit breaker, blocking limit, and PTL retry."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from src.compact.auto_compact import (
     auto_compact,
@@ -11,8 +11,7 @@ from src.compact.auto_compact import (
     BLOCKING_LIMIT_BUFFER_TOKENS,
 )
 from src.core.errors import is_prompt_too_long
-from src.core.types import MessageHistory, Message, TextContent
-from src.providers.types import ProviderMessage, TextBlock, Usage
+from src.core.types import LoopResult, MessageHistory, Message, TextContent, ToolUseContext
 
 
 # ---------------------------------------------------------------------------
@@ -51,24 +50,19 @@ class TestIsPromptTooLong:
 
 
 # ---------------------------------------------------------------------------
-# Helper: mock query_model response
+# Helper: mock run_agent_loop response
 # ---------------------------------------------------------------------------
 
-def _make_mock_response(text: str = "Summary: conversation about greetings"):
-    return ProviderMessage(
-        content=[TextBlock(text=text)],
-        stop_reason="end_turn",
-        usage=Usage(input_tokens=100, output_tokens=50),
-    )
+def _completed(text: str = "Summary: conversation about greetings") -> LoopResult:
+    return LoopResult(reason="completed", text=text)
 
 
-def _make_error_response(error_text: str, error_code: str = "api_unknown"):
-    return ProviderMessage(
-        content=[TextBlock(text=error_text)],
-        stop_reason="error",
-        is_error=True,
-        error_code=error_code,
-    )
+def _loop_error(text: str = "connection refused") -> LoopResult:
+    return LoopResult(reason="error", text=text)
+
+
+def _ptl(text: str = "prompt is too long") -> LoopResult:
+    return LoopResult(reason="prompt_too_long", text=text)
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +76,13 @@ class TestAutoCompactRetry:
         history.add_user("hello")
         history.add_assistant([TextContent(text="world")])
 
-        with patch("src.compact.auto_compact.query_model", new_callable=AsyncMock) as mock_sq:
-            mock_sq.return_value = _make_mock_response()
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", return_value=_completed()) as mock_loop:
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is True
         assert len(history.messages) == 1  # replaced with summary
+        mock_loop.assert_called_once()
+        assert mock_loop.call_args.kwargs["query_source"] == "compact"
 
     @pytest.mark.asyncio
     async def test_ptl_retry_then_success(self):
@@ -101,21 +96,17 @@ class TestAutoCompactRetry:
 
         call_count = 0
 
-        async def _mock_query(**kwargs):
+        async def _mock_loop(**kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return _make_error_response(
-                    "prompt is too long: 200000 > 128000",
-                    error_code="api_prompt_too_long",
-                )
-            return _make_mock_response("Summary: three exchanges")
+                return _ptl("prompt is too long: 200000 > 128000")
+            return _completed("Summary: three exchanges")
 
-        with patch("src.compact.auto_compact.query_model", side_effect=_mock_query):
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", side_effect=_mock_loop):
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is True
-        # First call PTL → tries without thinking on same messages (call 2) → succeeds
         assert call_count == 2
 
     @pytest.mark.asyncio
@@ -126,13 +117,10 @@ class TestAutoCompactRetry:
             history.add_assistant([TextContent(text=f"resp{i}")])
 
         async def _always_ptl(**kwargs):
-            return _make_error_response(
-                "prompt is too long",
-                error_code="api_prompt_too_long",
-            )
+            return _ptl("prompt is too long")
 
-        with patch("src.compact.auto_compact.query_model", side_effect=_always_ptl):
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", side_effect=_always_ptl):
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is False
 
@@ -147,10 +135,10 @@ class TestAutoCompactRetry:
         async def _fail(**kwargs):
             nonlocal call_count
             call_count += 1
-            return _make_error_response("connection refused")
+            return _loop_error("connection refused")
 
-        with patch("src.compact.auto_compact.query_model", side_effect=_fail):
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", side_effect=_fail):
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is False
         # Only 1 call: non-PTL/non-thinking errors don't trigger thinking fallback
@@ -159,7 +147,7 @@ class TestAutoCompactRetry:
     @pytest.mark.asyncio
     async def test_empty_history(self):
         history = MessageHistory()
-        result = await auto_compact(history)
+        result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
         assert result is False
 
 
@@ -177,37 +165,26 @@ class TestTruncationStatePreservation:
             history.add_user(f"msg{i}")
             history.add_assistant([TextContent(text=f"resp{i}")])
 
-        original_msg_count = len(history.messages)
         call_message_counts: list[int] = []
         call_count = 0
 
-        async def _mock_query(**kwargs):
+        async def _mock_loop(**kwargs):
             nonlocal call_count
             call_count += 1
-            msg_count = len(kwargs.get("messages", []))
+            msg_count = len(kwargs["tool_use_context"].messages.messages)
             call_message_counts.append(msg_count)
-            if call_count <= 2:
-                # Both thinking and non-thinking fail with PTL on first truncation state
-                return _make_error_response(
-                    "prompt is too long: 200000 tokens > 128000",
-                    error_code="api_prompt_too_long",
-                )
+            if call_count == 1:
+                return _ptl("prompt is too long: 200000 tokens > 128000")
             # After truncation, succeed
-            return _make_mock_response("Summary")
+            return _completed("Summary")
 
-        with patch("src.compact.auto_compact.query_model", side_effect=_mock_query):
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", side_effect=_mock_loop):
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is True
-        # Call 1: thinking=True on full messages → PTL
-        # Call 2: thinking=False on SAME full messages → PTL
-        # (truncation happens here)
-        # Call 3: thinking=True on truncated messages → success
-        assert call_count == 3
+        assert call_count == 2
         # After truncation, message count should be smaller
-        assert call_message_counts[2] < call_message_counts[0]
-        # Call 1 and 2 should have the same message count (same truncation state)
-        assert call_message_counts[0] == call_message_counts[1]
+        assert call_message_counts[1] < call_message_counts[0]
 
     @pytest.mark.asyncio
     async def test_thinking_ptl_then_no_thinking_success(self):
@@ -218,21 +195,18 @@ class TestTruncationStatePreservation:
 
         call_count = 0
 
-        async def _mock_query(**kwargs):
+        async def _mock_loop(**kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return _make_error_response(
-                    "prompt is too long: 200000 > 128000",
-                    error_code="api_prompt_too_long",
-                )
-            return _make_mock_response("Summary")
+                return _ptl("prompt is too long: 200000 > 128000")
+            return _completed("Summary")
 
-        with patch("src.compact.auto_compact.query_model", side_effect=_mock_query):
-            result = await auto_compact(history)
+        with patch("src.agent_loop.run_agent_loop", side_effect=_mock_loop):
+            result = await auto_compact(ToolUseContext(messages=history, tools=[], system_prompt="test"))
 
         assert result is True
-        assert call_count == 2  # thinking PTL → no-thinking success
+        assert call_count == 2
 
 
 # ---------------------------------------------------------------------------

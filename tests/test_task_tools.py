@@ -4,10 +4,18 @@ from unittest import mock
 
 import pytest
 
+import src.task_store as task_store_mod
 from src.task_store import TaskStore
 from src.tools.task_create import tool as create_tool, SCHEMA as CREATE_SCHEMA
 from src.tools.task_update import tool as update_tool, SCHEMA as UPDATE_SCHEMA
 from src.tools.task_list import tool as list_tool, SCHEMA as LIST_SCHEMA
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_task_store():
+    task_store_mod._global_store = None
+    yield
+    task_store_mod._global_store = None
 
 
 def _make_context(task_store=None):
@@ -71,10 +79,11 @@ class TestTaskCreate:
         assert "error" in result.data
 
     @pytest.mark.asyncio
-    async def test_no_store_error(self):
+    async def test_no_store_falls_back_to_global_store(self):
         ctx = _make_context(None)
         result = await create_tool.executor({"content": "Task"}, ctx)
-        assert "error" in result.data
+        assert result.data["id"] == 1
+        assert result.data["content"] == "Task"
 
     def test_map_result_success(self):
         text = create_tool.map_result({"id": 1, "content": "Do stuff", "status": "pending"})
@@ -142,7 +151,7 @@ class TestTaskUpdate:
         assert "error" in result.data
 
     @pytest.mark.asyncio
-    async def test_no_store_error(self):
+    async def test_no_store_falls_back_to_global_store(self):
         ctx = _make_context(None)
         result = await update_tool.executor({"task_id": 1}, ctx)
         assert "error" in result.data
@@ -187,10 +196,10 @@ class TestTaskList:
         assert len(result.data["tasks"]) == 2
 
     @pytest.mark.asyncio
-    async def test_no_store_error(self):
+    async def test_no_store_falls_back_to_global_store(self):
         ctx = _make_context(None)
         result = await list_tool.executor({}, ctx)
-        assert "error" in result.data
+        assert result.data["tasks"] == []
 
     def test_map_result_no_tasks(self):
         text = list_tool.map_result({"tasks": []})

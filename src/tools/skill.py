@@ -250,11 +250,12 @@ async def _execute_fork(
     try:
         from src.agent_loop import run_agent_loop
 
-        result_text = await run_agent_loop(
+        result = await run_agent_loop(
             system_prompt=sub_system_prompt,
             tool_use_context=sub_context,
             max_turns=config.MAX_TURNS,
             label=label,
+            query_source="subagent",
             on_event=context.on_event,
         )
     except Exception as e:
@@ -265,11 +266,11 @@ async def _execute_fork(
         })
 
     return ToolResult(data={
-        "success": True,
+        "success": result.ok,
         "commandName": skill.name,
         "status": "forked",
         "agentId": sub_context.agent_state.agent_id,
-        "result": result_text,
+        "result": result.text,
     })
 
 

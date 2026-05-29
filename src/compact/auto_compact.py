@@ -19,12 +19,10 @@ from __future__ import annotations
 import logging
 
 from src.core import config
-from src.api import query_model
 from src.compact.prompt import get_compact_prompt, get_compact_user_summary
 from src.compact.grouping import truncate_head, MAX_PTL_RETRIES
-from src.core.errors import AgentErrorCode, get_ptl_token_gap
-from src.core.types import MessageHistory, Message
-from src.providers.types import ProviderMessage
+from src.core.errors import get_ptl_token_gap
+from src.core.types import MessageHistory, Message, ToolUseContext
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +47,6 @@ def _messages_to_prepared(messages: list[Message]) -> list[Message]:
     return MessageHistory(messages=messages).prepare_messages()
 
 
-def _extract_summary(response: ProviderMessage) -> str | None:
-    """Extract text summary from a successful ProviderMessage. None if empty."""
-    if not response.content:
-        return None
-    raw_text = ""
-    for block in response.content:
-        if block.type == "text":
-            raw_text += block.text
-    return raw_text.strip() or None
-
-
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -67,77 +54,58 @@ def _extract_summary(response: ProviderMessage) -> str | None:
 async def auto_compact(history: MessageHistory) -> bool:
     """Full compact with truncate-head retry on prompt_too_long.
 
-    Manages truncation at the outer level so that thinking/non-thinking
-    fallback shares the same truncation state (fixes state-loss bug where
-    fallback would restart from untruncated history).
-
-    For each truncation state:
-      1. Try with thinking enabled (if configured)
-      2. If PTL, try without thinking on the SAME truncated messages
-      3. If still PTL, truncate and loop
+    Uses run_agent_loop as the unified LLM entry point (query_source="compact"
+    disables internal compaction to prevent recursion). Thinking fallback is
+    handled internally by run_agent_loop.
 
     Returns True if compaction was performed, False otherwise.
     """
-    thinking = config.THINKING_ENABLED
-    max_tokens_thinking = (
-        config.THINKING_BUDGET_TOKENS + config.AUTO_COMPACT_MAX_TOKENS
-        if thinking else config.AUTO_COMPACT_MAX_TOKENS
-    )
-    max_tokens_no_thinking = config.AUTO_COMPACT_MAX_TOKENS
-
     source_messages = list(history.messages)
     if not source_messages:
         return False
 
-    ptl_value = AgentErrorCode.API_PROMPT_TOO_LONG.value
-    thinking_error_value = AgentErrorCode.API_THINKING_ERROR.value
+    compact_prompt = get_compact_prompt()
 
     for attempt in range(MAX_PTL_RETRIES + 1):
         prepared = _messages_to_prepared(source_messages)
         if not prepared:
             return False
 
-        compact_kwargs = dict(
-            model=config.MODELS.compact,
-            system=get_compact_prompt(),
-            messages=prepared,
-            tools=[],
+        from src.agent_loop import run_agent_loop
+
+        compact_history = MessageHistory(prepared)
+        compact_context = ToolUseContext(messages=compact_history, tools=[])
+
+        result = await run_agent_loop(
+            system_prompt=compact_prompt,
+            tool_use_context=compact_context,
+            max_turns=1,
+            label="compact",
+            query_source="compact",
+            thinking=config.THINKING_ENABLED,
+            on_event=lambda _: None,
         )
 
-        response = await query_model(**compact_kwargs, max_tokens=max_tokens_thinking, thinking=thinking)
+        if result.ok and result.text:
+            summary_text = get_compact_user_summary(result.text, suppress_follow_up=True)
+            history.replace_with_summary(summary_text)
+            logger.info("Auto compact: replaced %d messages with summary", len(prepared))
+            return True
 
-        if response.is_error and thinking and response.error_code in (ptl_value, thinking_error_value):
+        if result.reason == "prompt_too_long" and attempt < MAX_PTL_RETRIES:
+            token_gap = get_ptl_token_gap(result.text)
+            truncated = truncate_head(source_messages, token_gap=token_gap)
+            if truncated is None:
+                logger.warning("Auto compact: cannot truncate further, giving up")
+                return False
+            source_messages = truncated
             logger.info(
-                "Auto compact: thinking attempt got %s, trying without thinking",
-                response.error_code,
+                "Auto compact: prompt too long, truncated to %d messages (attempt %d/%d)",
+                len(source_messages), attempt + 1, MAX_PTL_RETRIES,
             )
-            response = await query_model(**compact_kwargs, max_tokens=max_tokens_no_thinking, thinking=False)
+            continue
 
-        if response.is_error:
-            error_text = response.content[0].text if response.content else ""
-            if response.error_code == ptl_value and attempt < MAX_PTL_RETRIES:
-                token_gap = get_ptl_token_gap(error_text)
-                truncated = truncate_head(source_messages, token_gap=token_gap)
-                if truncated is None:
-                    logger.warning("Auto compact: cannot truncate further, giving up")
-                    return False
-                source_messages = truncated
-                logger.info(
-                    "Auto compact: prompt too long, truncated to %d messages (attempt %d/%d)",
-                    len(source_messages), attempt + 1, MAX_PTL_RETRIES,
-                )
-                continue
-            logger.warning("Auto compact: failed with %s: %s", response.error_code, error_text)
-            return False
-
-        summary = _extract_summary(response)
-        if not summary:
-            logger.warning("Auto compact: LLM returned no text content")
-            return False
-
-        summary_text = get_compact_user_summary(summary, suppress_follow_up=True)
-        history.replace_with_summary(summary_text)
-        logger.info("Auto compact: replaced %d messages with summary", len(prepared))
-        return True
+        logger.warning("Auto compact: failed with reason=%s: %s", result.reason, result.text[:200] if result.text else "")
+        return False
 
     return False

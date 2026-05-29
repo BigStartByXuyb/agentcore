@@ -2,11 +2,24 @@
 
 V1: single agent, memory-only. Tasks are lost on process exit.
 Corresponds to Claude Code's TaskStore (simplified).
+
+All agents in the same session share one TaskStore instance,
+accessed via get_task_store().
 """
 
 from __future__ import annotations
 
 from src.core.types import TaskItem, TaskStatus
+
+_global_store: TaskStore | None = None
+
+
+def get_task_store() -> TaskStore:
+    """Return the session-global TaskStore singleton."""
+    global _global_store
+    if _global_store is None:
+        _global_store = TaskStore()
+    return _global_store
 
 
 class TaskStore:

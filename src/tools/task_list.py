@@ -20,7 +20,8 @@ SCHEMA: dict = {
 async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     store = getattr(context, "task_store", None)
     if store is None:
-        return ToolResult(data={"tasks": [], "error": "TaskStore not available."})
+        from src.task_store import get_task_store
+        store = get_task_store()
 
     tasks = store.list_all()
     return ToolResult(data={

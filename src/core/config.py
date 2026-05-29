@@ -1,8 +1,14 @@
 """Configuration loaded from environment variables."""
 
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Session identity — unique per process lifetime, shared across all agents
+# ---------------------------------------------------------------------------
+SESSION_ID: str = os.environ.get("AGENT_SESSION_ID", uuid.uuid4().hex[:12])
 
 ANTHROPIC_AUTH_TOKEN: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
 ANTHROPIC_BASE_URL: str | None = os.environ.get("ANTHROPIC_BASE_URL", None)

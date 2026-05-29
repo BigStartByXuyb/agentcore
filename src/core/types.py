@@ -455,6 +455,31 @@ class AgentState:
     _task_store: Any | None = field(default=None, repr=False)
 
 
+@dataclass
+class LoopResult:
+    """Structured return value from run_agent_loop.
+
+    Callers inspect `reason` to decide next steps; `text` carries the final
+    assistant output (or error description). Exceptions never escape the loop.
+    """
+
+    reason: str
+    """
+    "completed"      — LLM returned end_turn with no tool calls
+    "max_turns"      — reached the turn limit
+    "blocking_limit" — context window nearly full, refused to call API
+    "auth_error"     — 401/403, unrecoverable
+    "prompt_too_long"— PTL error (only returned when query_source disables internal compaction)
+    "error"          — unhandled exception caught by outer try/except
+    """
+    text: str
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.reason in ("completed", "max_turns")
+
+
 class ToolDef:
     """Tool definition — each tool constructs one instance and exports it.
 

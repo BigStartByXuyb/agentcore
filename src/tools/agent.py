@@ -205,11 +205,12 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
     try:
         from src.agent_loop import run_agent_loop
 
-        result_text = await run_agent_loop(
+        result = await run_agent_loop(
             system_prompt=system_prompt,
             tool_use_context=sub_context,
             max_turns=agent_def.max_turns,
             label=label,
+            query_source="subagent",
             on_event=context.on_event,
         )
     except Exception as e:
@@ -220,9 +221,9 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         })
 
     return ToolResult(data={
-        "success": True,
+        "success": result.ok,
         "agent_name": agent_def.name,
-        "result": result_text,
+        "result": result.text,
     })
 
 

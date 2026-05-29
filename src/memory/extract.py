@@ -166,13 +166,16 @@ async def run_memory_extraction(
     try:
         from src.agent_loop import run_agent_loop
 
-        await run_agent_loop(
+        result = await run_agent_loop(
             system_prompt=system_prompt,
             tool_use_context=tool_use_context,
             max_turns=5,
             label="memory-extraction",
+            query_source="memory",
             on_event=cb,
         )
+        if not result.ok:
+            logger.debug("Memory extraction ended with reason=%s", result.reason)
     except Exception as e:
         logger.debug("Memory extraction failed (non-critical): %s", e)
 

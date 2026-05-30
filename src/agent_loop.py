@@ -134,7 +134,12 @@ def _build_file_restore_attachments(
     parts: list[str] = []
     used_tokens = 0
     for path, state in recent:
-        content = state.content
+        try:
+            from src.utils.file_encoding import read_file_streaming
+            lines, _, _ = read_file_streaming(path)
+            content = "\n".join(lines)
+        except Exception:
+            content = state.content
         tokens = config.estimate_tokens(content)
         if tokens > POST_COMPACT_MAX_TOKENS_PER_FILE:
             ratio = POST_COMPACT_MAX_TOKENS_PER_FILE / tokens

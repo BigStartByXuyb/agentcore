@@ -109,9 +109,10 @@ the task. Do not batch up multiple tasks before marking them as \
 completed.
 
 ## bash
-Execute shell commands. Use for:
+Execute shell commands. You have full internet access through bash. Use for:
 - Running programs, scripts, builds, tests
-- Git operations (commit, push, branch, etc.)
+- Git operations (clone, pull, push, commit, branch, etc.)
+- Network operations (curl, wget, git clone from remote URLs, API calls)
 - Package management (pip, npm, etc.)
 - System commands (mkdir, etc.)
 

@@ -14,8 +14,12 @@ SCHEMA: dict = {
     "name": "bash",
     "description": (
         "Execute a shell command and return its output. "
-        "Use this for running programs, listing files, installing packages, "
-        "and any other system operations."
+        "Use this for running programs, scripts, builds, tests, "
+        "git operations (clone, pull, push, commit, etc.), "
+        "package management (pip, npm, etc.), "
+        "network operations (curl, wget, git clone from remote URLs), "
+        "and any other system or network operations. "
+        "You have full internet access through this tool."
     ),
     "input_schema": {
         "type": "object",

@@ -55,11 +55,12 @@ async def auto_compact(parent_context: ToolUseContext) -> bool:
     """Full compact with truncate-head retry on prompt_too_long.
 
     Uses run_agent_loop as the unified LLM entry point (query_source="compact"
-    disables internal compaction to prevent recursion). Thinking is disabled
-    for compact (no need for deep reasoning, saves output tokens).
+    skips internal compaction checks to prevent recursion).
 
-    Reuses the parent's system_prompt for prompt cache prefix sharing.
-    The compact instruction is appended as a user message.
+    Inherits the parent's system_prompt and thinking config for prompt cache
+    prefix sharing. The compact instruction is appended as a user message.
+    File state cache is cloned from the parent to ensure consistent changed-file
+    detection (matching the parent's prefix for cache hits).
 
     Returns True if compaction was performed, False otherwise.
     """

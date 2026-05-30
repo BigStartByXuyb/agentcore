@@ -179,36 +179,121 @@ def _reinject_after_compact(
         last_msg.attach(attachments)
 
 
-async def run_agent_loop(
+async def _try_compaction(
     *,
-    memory_task: asyncio.Task[Attachment | None] | None = None,
     tool_use_context: ToolUseContext,
-    max_turns: int,
-    query_source: str = "main",
+    state: AgentState,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
-) -> LoopResult:
-    """Run the core LLM <-> tool execution cycle.
+) -> None:
+    """Micro compact + auto compact with circuit breaker."""
+    history = tool_use_context.messages
+    label = tool_use_context.label
+    cache = tool_use_context.file_state_cache
 
-    Emits AgentEvent objects via on_event callback.
-    Returns LoopResult with structured reason + text. Exceptions never escape.
+    if should_micro_compact(history.messages):
+        micro_compact(history.messages)
 
-    query_source controls internal behavior:
-      - "main" / "subagent": full capabilities including auto-compaction
-      - "compact" / "memory": skips compaction detection (prevents recursion)
+    estimated = estimate_token_count(history, state)
+    if should_auto_compact(estimated):
+        if state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
+            pass  # circuit breaker open — skip auto compact
+        else:
+            file_snapshot = cache.snapshot() if cache is not None else {}
+            try:
+                ok = await auto_compact(tool_use_context)
+            except Exception:
+                ok = False
+            if ok:
+                state.compact_consecutive_failures = 0
+                if cache is not None:
+                    cache.clear()
+                _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+            else:
+                state.compact_consecutive_failures += 1
+                if state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
+                    on_event(CompactCircuitBreaker(
+                        label=label,
+                        failures=state.compact_consecutive_failures,
+                        message="Auto-compact failed 3 consecutive times. Use /compact or /clear.",
+                    ))
+
+
+def _inject_attachments(
+    *,
+    tool_use_context: ToolUseContext,
+    state: AgentState,
+) -> None:
+    """Inject changed-files diffs and task reminders into the last user message."""
+    history = tool_use_context.messages
+    cache = tool_use_context.file_state_cache
+
+    if cache is not None:
+        changed_atts = cache.get_changed_files()
+        if changed_atts:
+            last_user = history.last_user_message()
+            if last_user is not None:
+                last_user.attach(changed_atts)
+
+    if "TaskUpdate" in tool_use_context.tools:
+        _task_store = get_task_store()
+        if (
+            _task_store.has_active()
+            and state.turns_since_task_write >= TASK_REMINDER_INTERVAL
+            and state.turns_since_task_reminder >= TASK_REMINDER_INTERVAL
+        ):
+            reminder = Attachment(
+                type="system_reminder",
+                content=(
+                    "<system-reminder>\n"
+                    "The task tools haven't been used recently. If you're working on "
+                    "tasks that would benefit from tracking progress, consider using "
+                    "TaskCreate to add new tasks and TaskUpdate to update task status "
+                    "(set to in_progress when starting, completed when done). "
+                    "Also consider cleaning up the task list if it has become stale. "
+                    "Only use these if relevant to the current work. "
+                    "This is just a gentle reminder - ignore if not applicable.\n"
+                    "</system-reminder>"
+                ),
+            )
+            last_user = history.last_user_message()
+            if last_user is not None:
+                last_user.attach([reminder])
+            state.turns_since_task_reminder = 0
+
+
+async def _pre_turn_maintenance(
+    *,
+    tool_use_context: ToolUseContext,
+    state: AgentState,
+    skip_compaction: bool,
+    on_event: EventCallback,
+    on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+) -> str | None:
+    """Per-turn housekeeping before API call.
+
+    Returns None on success, or an error message string if the loop should exit.
     """
-    try:
-        return await _run_agent_loop_inner(
-            memory_task=memory_task,
+    if not skip_compaction:
+        await _try_compaction(
             tool_use_context=tool_use_context,
-            max_turns=max_turns,
-            query_source=query_source,
+            state=state,
             on_event=on_event,
             on_compact_rebuild=on_compact_rebuild,
         )
-    except Exception as e:
-        logger.exception("Unhandled error in run_agent_loop")
-        return LoopResult(reason="error", text=str(e), error=e)
+
+    _inject_attachments(tool_use_context=tool_use_context, state=state)
+
+    history = tool_use_context.messages
+    if is_at_blocking_limit(estimate_token_count(history, state)):
+        on_event(BlockingLimitReached(
+            label=tool_use_context.label,
+            estimated_tokens=estimate_token_count(history, state),
+            message="Context window nearly full. Use /compact or /clear.",
+        ))
+        return "Context window nearly full. Use /compact or /clear."
+
+    return None
 
 
 async def _run_agent_loop_inner(
@@ -241,83 +326,16 @@ async def _run_agent_loop_inner(
                 last_msg = tool_use_context.messages.last_user_message()
                 if last_msg is not None:
                     last_msg.attach([mem])
-        cache = tool_use_context.file_state_cache
 
-        # --- Micro Compact: clear old tool_result content before API call ---
-        if not _skip_compaction and should_micro_compact(history.messages):
-            micro_compact(history.messages)
-
-        # --- Auto Compact: full LLM summarization if near context limit ---
-        if not _skip_compaction:
-            estimated = estimate_token_count(history, _state)
-            if should_auto_compact(estimated):
-                if _state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
-                    pass  # circuit breaker open — skip auto compact
-                else:
-                    file_snapshot = cache.snapshot() if cache is not None else {}
-                    try:
-                        ok = await auto_compact(tool_use_context)
-                    except Exception:
-                        ok = False
-                    if ok:
-                        _state.compact_consecutive_failures = 0
-                        if cache is not None:
-                            cache.clear()
-                        _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
-                    else:
-                        _state.compact_consecutive_failures += 1
-                        if _state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
-                            on_event(CompactCircuitBreaker(
-                                label=label,
-                                failures=_state.compact_consecutive_failures,
-                                message="Auto-compact failed 3 consecutive times. Use /compact or /clear.",
-                            ))
-
-        # --- Changed files: detect external modifications and inject diffs ---
-        if not _skip_compaction:
-            changed_atts = cache.get_changed_files() if cache is not None else []
-            if changed_atts:
-                last_user = history.last_user_message()
-                if last_user is not None:
-                    last_user.attach(changed_atts)
-
-        # --- Task reminder: nudge LLM if active tasks haven't been touched ---
-        # --- Task reminder: nudge LLM if active tasks haven't been touched ---
-        # Fires only when TaskUpdate tool is available (like Claude Code's approach)
-        if "TaskUpdate" in tool_use_context.tools:
-            _task_store = get_task_store()
-            if (
-                _task_store.has_active()
-                and _state.turns_since_task_write >= TASK_REMINDER_INTERVAL
-                and _state.turns_since_task_reminder >= TASK_REMINDER_INTERVAL
-            ):
-                reminder = Attachment(
-                    type="system_reminder",
-                    content=(
-                        "<system-reminder>\n"
-                        "The task tools haven't been used recently. If you're working on "
-                        "tasks that would benefit from tracking progress, consider using "
-                        "TaskCreate to add new tasks and TaskUpdate to update task status "
-                        "(set to in_progress when starting, completed when done). "
-                        "Also consider cleaning up the task list if it has become stale. "
-                        "Only use these if relevant to the current work. "
-                        "This is just a gentle reminder - ignore if not applicable.\n"
-                        "</system-reminder>"
-                    ),
-                )
-                last_user = history.last_user_message()
-                if last_user is not None:
-                    last_user.attach([reminder])
-                _state.turns_since_task_reminder = 0
-
-        # --- Blocking limit: refuse to call API if context nearly full ---
-        if is_at_blocking_limit(estimate_token_count(history, _state)):
-            on_event(BlockingLimitReached(
-                label=label,
-                estimated_tokens=estimate_token_count(history, _state),
-                message="Context window nearly full. Use /compact or /clear.",
-            ))
-            return LoopResult(reason="blocking_limit", text="Context window nearly full. Use /compact or /clear.")
+        error = await _pre_turn_maintenance(
+            tool_use_context=tool_use_context,
+            state=_state,
+            skip_compaction=_skip_compaction,
+            on_event=on_event,
+            on_compact_rebuild=on_compact_rebuild,
+        )
+        if error is not None:
+            return LoopResult(reason="blocking_limit", text=error)
 
         tools = build_tool_schemas(
             tool_registry,
@@ -383,11 +401,12 @@ async def _run_agent_loop_inner(
                     error_text = response.content[0].text if response.content else "Prompt is too long"
                     return LoopResult(reason="prompt_too_long", text=error_text)
                 on_event(Recovery(label=label, message="Prompt too long, compacting conversation..."))
-                file_snapshot = cache.snapshot() if cache is not None else {}
+                _cache = tool_use_context.file_state_cache
+                file_snapshot = _cache.snapshot() if _cache is not None else {}
                 if await auto_compact(tool_use_context):
                     _state.compact_consecutive_failures = 0
-                    if cache is not None:
-                        cache.clear()
+                    if _cache is not None:
+                        _cache.clear()
                     _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
                     continue
                 else:
@@ -465,6 +484,39 @@ async def _run_agent_loop_inner(
             _state.turns_since_task_reminder += 1
 
     return LoopResult(reason="max_turns", text=f"[Agent loop '{label}' reached max turns ({max_turns})]")
+
+
+async def run_agent_loop(
+    *,
+    memory_task: asyncio.Task[Attachment | None] | None = None,
+    tool_use_context: ToolUseContext,
+    max_turns: int,
+    query_source: str = "main",
+    on_event: EventCallback,
+    on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+) -> LoopResult:
+    """Run the core LLM <-> tool execution cycle.
+
+    Emits AgentEvent objects via on_event callback.
+    Returns LoopResult with structured reason + text. Exceptions never escape.
+
+    query_source controls internal behavior:
+      - "main" / "subagent": full capabilities including auto-compaction
+      - "compact" / "memory": skips compaction detection (prevents recursion)
+    """
+    try:
+        return await _run_agent_loop_inner(
+            memory_task=memory_task,
+            tool_use_context=tool_use_context,
+            max_turns=max_turns,
+            query_source=query_source,
+            on_event=on_event,
+            on_compact_rebuild=on_compact_rebuild,
+        )
+    except Exception as e:
+        logger.exception("Unhandled error in run_agent_loop")
+        return LoopResult(reason="error", text=str(e), error=e)
+
 
 # ---------------------------------------------------------------------------
 # Top-level entry point — called from main.py REPL

@@ -83,6 +83,12 @@ class FileStateCache:
     def snapshot(self) -> dict[str, FileState]:
         return dict(self._cache)
 
+    def clone(self) -> "FileStateCache":
+        """Create an independent copy of this cache."""
+        new = FileStateCache(max_size=self._max_size)
+        new._cache = OrderedDict(self._cache)
+        return new
+
     # ------------------------------------------------------------------
     # External change detection
     # ------------------------------------------------------------------

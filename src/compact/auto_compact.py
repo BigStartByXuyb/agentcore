@@ -84,7 +84,8 @@ async def auto_compact(parent_context: ToolUseContext) -> bool:
             tools=[],
             system_prompt=parent_context.system_prompt,
             label="compact",
-            thinking=False,
+            thinking=parent_context.thinking,
+            file_state_cache=parent_context.file_state_cache.clone() if parent_context.file_state_cache is not None else None,
         )
 
         result = await run_agent_loop(

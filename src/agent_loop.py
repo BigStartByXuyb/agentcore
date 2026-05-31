@@ -190,6 +190,7 @@ async def _try_compaction(
     state: AgentState,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+    session_storage: Any | None = None,
 ) -> None:
     """Micro compact + auto compact with circuit breaker."""
     history = tool_use_context.messages
@@ -214,6 +215,10 @@ async def _try_compaction(
                 if cache is not None:
                     cache.clear()
                 _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+                if session_storage:
+                    session_storage.append_compaction_marker()
+                    if history.messages:
+                        session_storage.append(history.messages[0])
             else:
                 state.compact_consecutive_failures += 1
                 if state.compact_consecutive_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
@@ -274,6 +279,7 @@ async def _pre_turn_maintenance(
     skip_compaction: bool,
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+    session_storage: Any | None = None,
 ) -> str | None:
     """Per-turn housekeeping before API call.
 
@@ -285,6 +291,7 @@ async def _pre_turn_maintenance(
             state=state,
             on_event=on_event,
             on_compact_rebuild=on_compact_rebuild,
+            session_storage=session_storage,
         )
 
     _inject_attachments(tool_use_context=tool_use_context, state=state)
@@ -309,6 +316,7 @@ async def _run_agent_loop_inner(
     query_source: str = "main",
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+    session_storage: Any | None = None,
 ) -> LoopResult:
     """Inner implementation — may raise; outer wrapper catches all."""
 
@@ -338,6 +346,7 @@ async def _run_agent_loop_inner(
             skip_compaction=_skip_compaction,
             on_event=on_event,
             on_compact_rebuild=on_compact_rebuild,
+            session_storage=session_storage,
         )
         if error is not None:
             return LoopResult(reason="blocking_limit", text=error)
@@ -396,7 +405,9 @@ async def _run_agent_loop_inner(
             # Unrecoverable — bail out immediately
             if ec == AgentErrorCode.API_AUTH_ERROR.value:
                 error_text = response.content[0].text if response.content else "Unknown error"
-                history.add_assistant([TextContent(text=error_text)])
+                msg = history.add_assistant([TextContent(text=error_text)])
+                if session_storage:
+                    session_storage.append(msg)
                 on_event(ErrorEvent(label=label, error_text=error_text))
                 return LoopResult(reason="auth_error", text=error_text)
 
@@ -413,6 +424,10 @@ async def _run_agent_loop_inner(
                     if _cache is not None:
                         _cache.clear()
                     _reinject_after_compact(history, on_compact_rebuild, file_snapshot)
+                    if session_storage:
+                        session_storage.append_compaction_marker()
+                        if history.messages:
+                            session_storage.append(history.messages[0])
                     continue
                 else:
                     _state.compact_consecutive_failures += 1
@@ -430,7 +445,9 @@ async def _run_agent_loop_inner(
 
             # No recovery matched — inject error message and continue
             error_text = response.content[0].text if response.content else "Unknown error"
-            history.add_assistant([TextContent(text=error_text)])
+            msg = history.add_assistant([TextContent(text=error_text)])
+            if session_storage:
+                session_storage.append(msg)
             on_event(ErrorEvent(label=label, error_text=error_text))
             continue
 
@@ -452,7 +469,9 @@ async def _run_agent_loop_inner(
         _msg_count_at_usage = len(history)
 
         assistant_content = _serialize_content(response.content)
-        history.add_assistant(assistant_content)
+        msg = history.add_assistant(assistant_content)
+        if session_storage:
+            session_storage.append(msg)
 
         # --- Execute tools (unified streaming path) ---
         assert streaming_executor is not None
@@ -460,6 +479,7 @@ async def _run_agent_loop_inner(
             tool_use_context = _apply_tool_results(
                 streaming_executor.collect_results(),
                 assistant_content, history, tool_use_context,
+                session_storage=session_storage,
             )
             tool_names_used = [t.name for t in streaming_executor._tools]
 
@@ -499,6 +519,7 @@ async def run_agent_loop(
     query_source: str = "main",
     on_event: EventCallback,
     on_compact_rebuild: Callable[[dict[str, Any]], list[Attachment]] | None = None,
+    session_storage: Any | None = None,
 ) -> LoopResult:
     """Run the core LLM <-> tool execution cycle.
 
@@ -517,6 +538,7 @@ async def run_agent_loop(
             query_source=query_source,
             on_event=on_event,
             on_compact_rebuild=on_compact_rebuild,
+            session_storage=session_storage,
         )
     except Exception as e:
         logger.exception("Unhandled error in run_agent_loop")
@@ -532,6 +554,7 @@ async def agent_loop(
     history: MessageHistory,
     state: AgentState,
     file_state_cache: Any | None = None,
+    session_storage: Any | None = None,
 ) -> LoopResult:
     """Run the agent loop for a single user turn.
 
@@ -562,6 +585,9 @@ async def agent_loop(
     attachments = _build_attachments()
     if attachments:
         user_msg.attach(attachments)
+
+    if session_storage:
+        session_storage.append(user_msg)
 
     def _rebuild_after_compact(file_snapshot: dict[str, Any]) -> list[Attachment]:
         s = build_skill_reminder(main_tools, use_sent_tracking=True, force=True)
@@ -610,6 +636,7 @@ async def agent_loop(
         max_turns=config.MAX_TURNS,
         on_event=handler,
         on_compact_rebuild=_rebuild_after_compact,
+        session_storage=session_storage,
     )
 
     # Background memory extraction — fire-and-forget asyncio task
@@ -656,6 +683,7 @@ def _apply_tool_results(
     assistant_content: list[ContentBlock],
     history: MessageHistory,
     tool_use_context: ToolUseContext,
+    session_storage: Any | None = None,
 ) -> ToolUseContext:
     """Process tool execution results: build tool_result messages, inject into history."""
     tool_result_blocks: list[ToolResultContent] = []
@@ -671,11 +699,18 @@ def _apply_tool_results(
             pending_context_modifier = result.context_modifier
 
     _recover_orphan_tool_results(assistant_content, tool_result_blocks)
-    history.add_tool_results(tool_result_blocks)
+    tr_msg = history.add_tool_results(tool_result_blocks)
+    if session_storage:
+        session_storage.append(tr_msg)
 
     if all_new_messages:
-        history.add_assistant_placeholder()
+        ph_msg = history.add_assistant_placeholder()
+        if session_storage:
+            session_storage.append(ph_msg)
         history.inject_messages(all_new_messages)
+        if session_storage:
+            for m in all_new_messages:
+                session_storage.append(m)
 
     if pending_context_modifier is not None:
         tool_use_context = pending_context_modifier(tool_use_context)

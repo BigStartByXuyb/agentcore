@@ -18,11 +18,23 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from src.core import config
 from src.agent_loop import agent_loop
-from src.core.types import AgentState, MessageHistory, PlanPhase
+from src.core.types import AgentState, MessageHistory
 from src.utils.file_state_cache import FileStateCache
 from src.mcp_tool import register_mcp_tools, shutdown_mcp
 from src.tools import registry as tool_registry
 from src.watcher import start_watchers
+from src.session import SessionStorage
+from src.commands import CommandContext, handle_clear, handle_resume, handle_sessions, handle_plan
+
+
+def _parse_resume_arg() -> str | None:
+    """Parse --resume [session_id] from sys.argv."""
+    if "--resume" not in sys.argv:
+        return None
+    idx = sys.argv.index("--resume")
+    if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith("-"):
+        return sys.argv[idx + 1]
+    return SessionStorage.last_session_id()
 
 
 async def async_main() -> None:
@@ -36,11 +48,31 @@ async def async_main() -> None:
     print(f"my-agent ready. {sandbox_manager.status_summary()}")
     print("Type 'exit' to quit.\n")
 
-    history = MessageHistory()
+    # --- Resume or fresh session ---
+    resume_id = _parse_resume_arg()
+    if resume_id:
+        try:
+            history = SessionStorage.load(resume_id)
+            print(f"[Resumed session: {resume_id}, {len(history)} messages]")
+        except FileNotFoundError:
+            print(f"[Session '{resume_id}' not found, starting fresh]")
+            history = MessageHistory()
+            resume_id = None
+    else:
+        history = MessageHistory()
+
     state = AgentState()
     file_cache = FileStateCache()
     await register_mcp_tools(tool_registry)
     start_watchers(asyncio.get_running_loop())
+
+    # --- Session storage ---
+    storage: SessionStorage | None = None
+    if config.SESSION_PERSIST_ENABLED:
+        storage = SessionStorage(config.SESSION_ID)
+        storage.open()
+
+    ctx = CommandContext(history=history, state=state, file_cache=file_cache, storage=storage)
 
     try:
         while True:
@@ -57,39 +89,35 @@ async def async_main() -> None:
                 print("Bye.")
                 break
 
-            # --- /clear command: reset session state ---
+            # --- Slash commands ---
             if stripped == "/clear":
-                from src.plan_mode import clear_slug_cache
-                clear_slug_cache(state.agent_id)
-                if hasattr(state, "_task_store") and state._task_store is not None:
-                    state._task_store.clear()
-                history = MessageHistory()
-                state = AgentState()
-                file_cache = FileStateCache()
-                print("Context cleared.")
+                ctx = await handle_clear(ctx)
                 continue
 
-            # --- /plan command: toggle plan mode ---
+            if stripped == "/resume" or stripped.startswith("/resume "):
+                arg = stripped[7:].strip() if len(stripped) > 7 else ""
+                ctx = await handle_resume(ctx, arg)
+                continue
+
+            if stripped == "/sessions":
+                ctx = await handle_sessions(ctx)
+                continue
+
             if stripped == "/plan" or stripped.startswith("/plan "):
                 task_desc = stripped[5:].strip() if len(stripped) > 5 else ""
-                if state.plan_phase == PlanPhase.ACTIVE and not task_desc:
-                    state.plan_phase = PlanPhase.EXITING
-                    print("Plan mode deactivated.")
+                ctx, forwarded = handle_plan(ctx, task_desc)
+                if forwarded is None:
                     continue
-                if state.plan_phase != PlanPhase.ACTIVE:
-                    from src.plan_mode import enter_plan_mode
-                    state.plan_file_path = enter_plan_mode(session_id=state.agent_id)
-                    state.plan_phase = PlanPhase.ACTIVE
-                    print(f"Plan mode activated. Plan file: {state.plan_file_path}")
-                if not task_desc:
-                    continue
-                stripped = task_desc
+                stripped = forwarded
 
+            # --- Agent loop ---
             try:
-                await agent_loop(stripped, history, state, file_cache)
+                await agent_loop(stripped, ctx.history, ctx.state, ctx.file_cache, session_storage=ctx.storage)
             except Exception as e:
                 print(f"\n[Error] {e}")
     finally:
+        if ctx.storage:
+            ctx.storage.close()
         await shutdown_mcp()
 
 

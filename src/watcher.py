@@ -166,7 +166,6 @@ def start_watchers(loop: asyncio.AbstractEventLoop) -> None:
 
         def on_any_event(self, event: FileSystemEvent) -> None:
             if event.is_directory:
-                self._notifier.trigger()
                 return
             src = getattr(event, "src_path", "")
             if src:

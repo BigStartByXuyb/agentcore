@@ -87,6 +87,9 @@ MEMORY_ENABLED: bool = True
 MEMORY_MAX_FILES: int = 200          # max memory files to scan
 MEMORY_MAX_RELEVANT: int = 5         # max memories to inject per turn
 
+# Session Persistence
+SESSION_PERSIST_ENABLED: bool = os.environ.get("AGENT_SESSION_PERSIST", "1") != "0"
+
 # Prompt Cache
 PROMPT_CACHE_ENABLED: bool = True
 PROMPT_CACHE_TTL_MINUTES: int = 5    # cache expiry threshold (minutes)

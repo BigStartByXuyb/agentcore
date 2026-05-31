@@ -195,7 +195,7 @@ def test_executor_no_prompt():
 def test_executor_depth_limit():
     """At max depth → error, no run_agent_loop call."""
     from src.core import config
-    ctx = _make_context(depth=config.MAX_AGENT_DEPTH)
+    ctx = _make_context(depth=config.get().max_agent_depth)
     result = _run_async(_execute({"description": "test", "prompt": "do something"}, ctx))
     assert result.data["success"] is False
     assert "Maximum agent nesting depth" in result.data["error"]

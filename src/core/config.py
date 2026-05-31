@@ -1,42 +1,27 @@
-"""Configuration loaded from environment variables."""
+"""Configuration loaded from settings.json + environment variables.
+
+Priority chain (lowest → highest):
+  provider defaults → user settings.json → project settings.json → env var
+"""
 
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
-# Session identity — unique per process lifetime, shared across all agents
+# SESSION_ID — runtime state, not config. Mutable by /clear and /resume.
 # ---------------------------------------------------------------------------
 SESSION_ID: str = os.environ.get("AGENT_SESSION_ID", uuid.uuid4().hex[:12])
 
-ANTHROPIC_AUTH_TOKEN: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-ANTHROPIC_BASE_URL: str | None = os.environ.get("ANTHROPIC_BASE_URL", None)
-
-# Active provider — resolved by src/providers/get_provider() at call time.
-# Override via env so users can swap backends without editing config.py.
-PROVIDER: str = os.environ.get("AGENT_PROVIDER", "anthropic")
-
-# DeepSeek
-DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL: str | None = os.environ.get("DEEPSEEK_BASE_URL", None)
-DEEPSEEK_REASONER_MODEL: str = os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner")
-
 
 # ---------------------------------------------------------------------------
-# Model tiers — per-provider model configuration
+# Model tiers
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ProviderModels:
-    """Model tiers for a provider.
-
-    - provider: which provider these models belong to
-    - main: primary model for the agent loop (user's choice)
-    - compact: model for conversation summarization
-    - side_query: cheap/fast model for memory recall, selection tasks
-    - fallback: degradation target when main fails (thinking errors, etc.)
-    """
     provider: str
     main: str
     compact: str
@@ -44,99 +29,234 @@ class ProviderModels:
     fallback: str
 
 
-def get_models() -> ProviderModels:
-    """Build ProviderModels from defaults + env overrides.
+# ---------------------------------------------------------------------------
+# Config dataclass — single source of truth for ALL configuration
+# ---------------------------------------------------------------------------
 
-    Priority: env var > user's AGENT_MODEL > provider default.
-    If AGENT_MODEL is set but AGENT_COMPACT_MODEL is not, compact follows main.
-    Raises ValueError if PROVIDER is not registered in the provider registry.
-    """
-    from src.providers import get_provider
+@dataclass
+class Config:
+    # --- Provider & models ---
+    provider: str = "anthropic"
+    models: ProviderModels = field(default_factory=lambda: ProviderModels(
+        provider="anthropic",
+        main="claude-sonnet-4-6",
+        compact="claude-sonnet-4-6",
+        side_query="claude-haiku-3-5",
+        fallback="claude-sonnet-4-6",
+    ))
+    model: str = "claude-sonnet-4-6"
 
-    adapter = get_provider(PROVIDER)
-    defaults = adapter.get_default_models()
+    # --- API credentials (env-only) ---
+    anthropic_auth_token: str = ""
+    anthropic_base_url: str | None = None
+    deepseek_api_key: str = ""
+    deepseek_base_url: str | None = None
+    deepseek_reasoner_model: str = "deepseek-reasoner"
 
-    user_main = os.environ.get("AGENT_MODEL")
-    main = user_main or defaults.main
-    compact = os.environ.get("AGENT_COMPACT_MODEL") or (main if user_main else defaults.compact)
-    side_query = os.environ.get("AGENT_SIDE_QUERY_MODEL") or defaults.side_query
-    fallback = os.environ.get("AGENT_FALLBACK_MODEL") or defaults.fallback
+    # --- Core limits (settings.json + env) ---
+    max_tokens: int = 16384
+    max_context_window: int = 200_000
+    max_turns: int = 30
+    max_agent_depth: int = 3
+
+    # --- Extended Thinking ---
+    thinking_enabled: bool = True
+    thinking_budget_tokens: int = 10000
+
+    # --- Memory ---
+    memory_enabled: bool = True
+    memory_max_files: int = 200
+    memory_max_relevant: int = 5
+
+    # --- Session ---
+    session_persist_enabled: bool = True
+
+    # --- Compaction ---
+    micro_compact_enabled: bool = True
+    micro_compact_keep_recent: int = 6
+    auto_compact_max_tokens: int = 4096
+
+    # --- Prompt cache (code constants, not user-configurable) ---
+    prompt_cache_enabled: bool = True
+    prompt_cache_ttl_minutes: int = 5
+
+    # --- Token estimation (code constant) ---
+    bytes_per_token: int = 2
+
+    # --- Streaming ---
+    disable_streaming_fallback: bool = False
+
+    # --- Sandbox ---
+    sandbox_enabled: bool = True
+    sandbox_allow_write: list[str] = field(default_factory=list)
+    sandbox_deny_write: list[str] = field(default_factory=list)
+    sandbox_deny_read: list[str] = field(default_factory=list)
+    sandbox_excluded_commands: list[str] = field(default_factory=list)
+
+    # --- Utility methods (use instance fields, not module globals) ---
+
+    def estimate_tokens(self, text: str) -> int:
+        """Rough token estimate from UTF-8 byte length."""
+        return len(text.encode("utf-8")) // self.bytes_per_token
+
+    def tokens_to_chars(self, tokens: int) -> int:
+        """Approximate character budget for a token limit."""
+        return tokens * self.bytes_per_token
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _val(settings_val: Any, default: Any, env_key: str | None = None, cast: Any = None) -> Any:
+    """Resolve value: env var > settings.json > code default."""
+    if env_key:
+        env = os.environ.get(env_key)
+        if env is not None:
+            return cast(env) if cast else env
+    return settings_val if settings_val is not None else default
+
+
+def _build_models(provider: str, settings: Any) -> ProviderModels:
+    """Build ProviderModels from provider defaults → settings → env vars."""
+    try:
+        from src.providers import get_provider
+        adapter = get_provider(provider)
+        defaults = adapter.get_default_models()
+    except Exception:
+        @dataclass
+        class _Defaults:
+            main: str = "claude-sonnet-4-6"
+            compact: str = "claude-sonnet-4-6"
+            side_query: str = "claude-haiku-3-5"
+            fallback: str = "claude-sonnet-4-6"
+        defaults = _Defaults()
+
+    s_main = settings.model
+    env_main = os.environ.get("AGENT_MODEL")
+    main = env_main or s_main or defaults.main
+
+    s_compact = settings.compact_model
+    compact = (
+        os.environ.get("AGENT_COMPACT_MODEL")
+        or s_compact
+        or (main if (env_main or s_main) else defaults.compact)
+    )
+    side_query = (
+        os.environ.get("AGENT_SIDE_QUERY_MODEL")
+        or settings.side_query_model
+        or defaults.side_query
+    )
+    fallback = (
+        os.environ.get("AGENT_FALLBACK_MODEL")
+        or settings.fallback_model
+        or defaults.fallback
+    )
 
     return ProviderModels(
-        provider=PROVIDER,
-        main=main,
-        compact=compact,
-        side_query=side_query,
-        fallback=fallback,
+        provider=provider, main=main, compact=compact,
+        side_query=side_query, fallback=fallback,
     )
 
 
-MODELS: ProviderModels = get_models()
-MODEL: str = MODELS.main  # backward-compatible alias
-MAX_TOKENS: int = 16384
-MAX_CONTEXT_WINDOW: int = 200_000  # model context window size (for auto compact threshold)
-MAX_TURNS: int = 30
-MAX_AGENT_DEPTH: int = 3  # Maximum nesting depth for sub-agents (fork skills / agent tool)
+def _build_config() -> Config:
+    """Read settings files + env vars, return a fully resolved Config."""
+    from src.core.settings import load_settings
+    s = load_settings()
 
-# Extended Thinking
-THINKING_ENABLED: bool = True
-THINKING_BUDGET_TOKENS: int = 10000  # budget_tokens for thinking (must be < MAX_TOKENS)
+    provider = _val(s.provider, "anthropic", "AGENT_PROVIDER")
 
-# Memory System
-MEMORY_ENABLED: bool = True
-MEMORY_MAX_FILES: int = 200          # max memory files to scan
-MEMORY_MAX_RELEVANT: int = 5         # max memories to inject per turn
+    try:
+        models = _build_models(provider, s)
+    except Exception:
+        models = ProviderModels(
+            provider=provider,
+            main="claude-sonnet-4-6", compact="claude-sonnet-4-6",
+            side_query="claude-haiku-3-5", fallback="claude-sonnet-4-6",
+        )
 
-# Session Persistence
-SESSION_PERSIST_ENABLED: bool = os.environ.get("AGENT_SESSION_PERSIST", "1") != "0"
+    persist_env = os.environ.get("AGENT_SESSION_PERSIST")
+    if persist_env is not None:
+        session_persist = persist_env != "0"
+    elif s.session_persist_enabled is not None:
+        session_persist = s.session_persist_enabled
+    else:
+        session_persist = True
 
-# Prompt Cache
-PROMPT_CACHE_ENABLED: bool = True
-PROMPT_CACHE_TTL_MINUTES: int = 5    # cache expiry threshold (minutes)
+    return Config(
+        provider=provider,
+        models=models,
+        model=models.main,
 
-# Micro Compact (Layer 1 context compaction)
-MICRO_COMPACT_ENABLED: bool = True
-MICRO_COMPACT_KEEP_RECENT: int = 6   # keep last N rounds of tool_results intact
+        anthropic_auth_token=os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+        anthropic_base_url=os.environ.get("ANTHROPIC_BASE_URL", None),
+        deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        deepseek_base_url=os.environ.get("DEEPSEEK_BASE_URL", None),
+        deepseek_reasoner_model=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
 
-# Auto Compact (Layer 2 — LLM summarization)
-AUTO_COMPACT_MAX_TOKENS: int = 4096  # max tokens for the summary response
+        max_tokens=_val(s.max_tokens, 16384),
+        max_context_window=_val(s.max_context_window, 200_000),
+        max_turns=_val(s.max_turns, 30),
+        max_agent_depth=_val(s.max_agent_depth, 3),
 
-# Token estimation
-BYTES_PER_TOKEN: int = 2  # conservative: covers CJK (~1-2 token/char, 3 bytes) and English (~0.25 token/char, 1 byte)
+        thinking_enabled=_val(s.thinking_enabled, True),
+        thinking_budget_tokens=_val(s.thinking_budget_tokens, 10000),
 
+        memory_enabled=_val(s.memory_enabled, True),
+        memory_max_files=_val(s.memory_max_files, 200),
+        memory_max_relevant=_val(s.memory_max_relevant, 5),
 
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate from UTF-8 byte length. Conservative (overestimates)."""
-    return len(text.encode("utf-8")) // BYTES_PER_TOKEN
+        session_persist_enabled=session_persist,
 
+        micro_compact_enabled=_val(s.micro_compact_enabled, True),
+        micro_compact_keep_recent=_val(s.micro_compact_keep_recent, 6),
+        auto_compact_max_tokens=_val(s.auto_compact_max_tokens, 4096),
 
-def tokens_to_chars(tokens: int) -> int:
-    """Reverse of estimate_tokens: approximate character budget for a token limit."""
-    return tokens * BYTES_PER_TOKEN
+        prompt_cache_enabled=True,
+        prompt_cache_ttl_minutes=5,
+        bytes_per_token=2,
 
+        disable_streaming_fallback=os.environ.get(
+            "DISABLE_STREAMING_FALLBACK", ""
+        ).lower() in ("1", "true"),
 
-# Streaming fallback — retry as non-streaming when stream breaks mid-way
-DISABLE_STREAMING_FALLBACK: bool = os.environ.get(
-    "DISABLE_STREAMING_FALLBACK", ""
-).lower() in ("1", "true")
-
-# Sandbox (bash command isolation via bubblewrap)
-SANDBOX_ENABLED: bool = True
-SANDBOX_ALLOW_WRITE: list[str] = []           # additional writable paths (project dir + /tmp always allowed)
-SANDBOX_DENY_WRITE: list[str] = []            # paths to force read-only inside sandbox
-SANDBOX_DENY_READ: list[str] = []             # paths to hide inside sandbox
-SANDBOX_EXCLUDED_COMMANDS: list[str] = []     # commands that skip sandboxing (e.g. "docker *")
+        sandbox_enabled=_val(s.sandbox_enabled, True),
+        sandbox_allow_write=s.sandbox_allow_write if s.sandbox_allow_write is not None else [],
+        sandbox_deny_write=s.sandbox_deny_write if s.sandbox_deny_write is not None else [],
+        sandbox_deny_read=s.sandbox_deny_read if s.sandbox_deny_read is not None else [],
+        sandbox_excluded_commands=s.sandbox_excluded_commands if s.sandbox_excluded_commands is not None else [],
+    )
 
 
 # ---------------------------------------------------------------------------
-# Unified directory paths — single source of truth for skills/agents/memory
+# Global singleton + accessors
+# ---------------------------------------------------------------------------
+
+_config: Config = _build_config()
+
+
+def get() -> Config:
+    """Return the current config. Always returns the latest after reload()."""
+    return _config
+
+
+def reload() -> None:
+    """Re-read settings.json and rebuild the Config singleton."""
+    global _config
+    _config = _build_config()
+
+    try:
+        from src.sandbox import sandbox_manager
+        sandbox_manager._config = None
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Directory paths
 # ---------------------------------------------------------------------------
 
 def get_skill_dirs() -> list[str]:
-    """Return ordered list of skill directories (project → global).
-
-    Ensures each directory exists (auto-creates if missing).
-    """
     cwd = os.getcwd()
     home = str(Path.home())
     dirs = [
@@ -150,10 +270,6 @@ def get_skill_dirs() -> list[str]:
 
 
 def get_agent_dirs() -> list[str]:
-    """Return ordered list of agent directories (project-level).
-
-    Ensures each directory exists (auto-creates if missing).
-    """
     cwd = os.getcwd()
     dirs = [
         os.path.join(cwd, "agents"),
@@ -165,7 +281,6 @@ def get_agent_dirs() -> list[str]:
 
 
 def get_permission_config_paths() -> tuple[str, str]:
-    """Return (user_config_path, project_config_path) for permissions."""
     home = str(Path.home())
     cwd = os.getcwd()
     user_config = os.path.join(home, ".my-agent", "permissions.json")

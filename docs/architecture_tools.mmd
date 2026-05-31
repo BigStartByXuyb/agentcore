@@ -1,0 +1,57 @@
+%% ============================================================
+%% My-Agent 工具系统架构
+%% ============================================================
+
+graph LR
+    subgraph TOOL_SYSTEM["工具系统"]
+        direction TB
+
+        subgraph REGISTRY["ALL_TOOLS 注册表"]
+            direction LR
+            R_BASH["bash"]
+            R_READ["read_file"]
+            R_GREP["grep"]
+            R_SKILL["Skill"]
+            R_AGENT["agent"]
+            R_MCP["mcp_*<br/>(动态注册)"]
+        end
+
+        subgraph TOOLDEF["ToolDef 结构"]
+            direction TB
+            TD_SCHEMA["schema: dict<br/>→ 发给 LLM 的工具描述"]
+            TD_EXEC["executor: Callable<br/>→ 执行器 (普通/generator)"]
+            TD_MAP["map_result: Callable<br/>→ data → LLM 可读文本"]
+            TD_RO["is_read_only: Callable?<br/>→ 判断是否只读"]
+        end
+
+        subgraph RESULT["ToolResult 统一返回"]
+            direction TB
+            TR_DATA["data: Any<br/>结构化数据"]
+            TR_MSG["new_messages: list<br/>额外注入消息 (Skill inline)"]
+            TR_CTX["context_modifier: Callable?<br/>修改后续上下文 (Skill)"]
+        end
+    end
+
+    subgraph PERMISSION["权限系统 permissions.py"]
+        direction TB
+        P_PROJECT["项目级规则<br/>.my-agent/permissions.json"]
+        P_USER["用户级规则<br/>~/.my-agent/permissions.json"]
+        P_TEMP["临时规则<br/>运行时动态添加"]
+        P_PROJECT --> P_CHECK["check(tool, input)<br/>→ allow / deny / ask"]
+        P_USER --> P_CHECK
+        P_TEMP --> P_CHECK
+    end
+
+    REGISTRY --> TOOLDEF
+    TOOLDEF --> RESULT
+    REGISTRY -.->|执行前检查| PERMISSION
+
+    classDef reg fill:#9C27B0,color:#fff
+    classDef def fill:#3F51B5,color:#fff
+    classDef res fill:#009688,color:#fff
+    classDef perm fill:#FF5722,color:#fff
+
+    class R_BASH,R_READ,R_GREP,R_SKILL,R_AGENT,R_MCP reg
+    class TD_SCHEMA,TD_EXEC,TD_MAP,TD_RO def
+    class TR_DATA,TR_MSG,TR_CTX res
+    class P_PROJECT,P_USER,P_TEMP,P_CHECK perm

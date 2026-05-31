@@ -25,10 +25,10 @@ CLEARED_MESSAGE = "[Old tool result content cleared]"
 
 def should_micro_compact(messages: list[Message]) -> bool:
     """Decide whether micro compact should run right now."""
-    if not config.MICRO_COMPACT_ENABLED:
+    if not config.get().micro_compact_enabled:
         return False
 
-    if not config.PROMPT_CACHE_ENABLED:
+    if not config.get().prompt_cache_enabled:
         return True
 
     last_assistant = _find_last_assistant(messages)
@@ -36,7 +36,7 @@ def should_micro_compact(messages: list[Message]) -> bool:
         return False
 
     gap_seconds = time.time() - last_assistant.timestamp
-    return gap_seconds > config.PROMPT_CACHE_TTL_MINUTES * 60
+    return gap_seconds > config.get().prompt_cache_ttl_minutes * 60
 
 
 def micro_compact(messages: list[Message], *, keep_recent: int | None = None) -> int:
@@ -48,7 +48,7 @@ def micro_compact(messages: list[Message], *, keep_recent: int | None = None) ->
     Returns the number of tool results cleared.
     """
     if keep_recent is None:
-        keep_recent = config.MICRO_COMPACT_KEEP_RECENT
+        keep_recent = config.get().micro_compact_keep_recent
     keep_recent = max(1, keep_recent)
 
     rounds = _collect_rounds(messages)

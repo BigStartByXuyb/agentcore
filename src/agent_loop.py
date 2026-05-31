@@ -88,9 +88,9 @@ def _build_invoked_skills_attachment(
     used_tokens = 0
     for sk in skills:
         content = sk.content
-        tokens = config.estimate_tokens(content)
+        tokens = config.get().estimate_tokens(content)
         if tokens > POST_COMPACT_MAX_TOKENS_PER_SKILL:
-            char_budget = config.tokens_to_chars(POST_COMPACT_MAX_TOKENS_PER_SKILL)
+            char_budget = config.get().tokens_to_chars(POST_COMPACT_MAX_TOKENS_PER_SKILL)
             content = content[:char_budget] + (
                 "\n\n[... skill content truncated for compaction; "
                 f"use Read on the skill path ({sk.skill_path}) if you need the full text]"
@@ -140,7 +140,7 @@ def _build_file_restore_attachments(
             content = "\n".join(lines)
         except Exception:
             content = state.content
-        tokens = config.estimate_tokens(content)
+        tokens = config.get().estimate_tokens(content)
         if tokens > POST_COMPACT_MAX_TOKENS_PER_FILE:
             ratio = POST_COMPACT_MAX_TOKENS_PER_FILE / tokens
             content = content[: int(len(content) * ratio)]
@@ -617,7 +617,7 @@ async def agent_loop(
         tools=tool_registry.list_names(),
         system_prompt=system,
         label="main",
-        thinking=config.THINKING_ENABLED,
+        thinking=config.get().thinking_enabled,
         permissions=perm_engine,
         file_state_cache=file_state_cache,
         task_store=state._task_store,
@@ -633,7 +633,7 @@ async def agent_loop(
     result = await run_agent_loop(
         memory_task=memory_task,
         tool_use_context=tool_use_context,
-        max_turns=config.MAX_TURNS,
+        max_turns=config.get().max_turns,
         on_event=handler,
         on_compact_rebuild=_rebuild_after_compact,
         session_storage=session_storage,

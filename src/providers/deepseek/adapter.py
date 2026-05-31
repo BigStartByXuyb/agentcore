@@ -103,8 +103,8 @@ class DeepSeekAdapter:
         if self._client is None:
             import openai
             self._client = openai.AsyncOpenAI(
-                api_key=config.DEEPSEEK_API_KEY,
-                base_url=config.DEEPSEEK_BASE_URL or "https://api.deepseek.com",
+                api_key=config.get().deepseek_api_key,
+                base_url=config.get().deepseek_base_url or "https://api.deepseek.com",
                 max_retries=0,
             )
         return self._client
@@ -127,9 +127,9 @@ class DeepSeekAdapter:
     ) -> ProviderMessage:
         """Single API call — no retry (api.py handles that)."""
         client = self.get_client()
-        default_model = config.DEEPSEEK_REASONER_MODEL if thinking else config.MODELS.main
+        default_model = config.get().deepseek_reasoner_model if thinking else config.get().models.main
         resolved_model = model or default_model
-        resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        resolved_max_tokens = max_tokens or config.get().max_tokens
 
         oai_messages = converter.messages_to_openai(messages, system)
         oai_tools = converter.tools_to_openai(tools) if tools else None
@@ -161,11 +161,11 @@ class DeepSeekAdapter:
     ) -> _DeepSeekStream:
         """Open a streaming connection — no retry (api.py handles that)."""
         if thinking and model is None:
-            model = config.DEEPSEEK_REASONER_MODEL
+            model = config.get().deepseek_reasoner_model
 
         client = self.get_client()
-        resolved_model = model or config.MODELS.main
-        resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        resolved_model = model or config.get().models.main
+        resolved_max_tokens = max_tokens or config.get().max_tokens
 
         oai_messages = converter.messages_to_openai(messages, system)
         oai_tools = converter.tools_to_openai(tools) if tools else None

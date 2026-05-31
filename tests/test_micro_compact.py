@@ -215,27 +215,39 @@ class TestMicroCompact:
 # should_micro_compact
 # ---------------------------------------------------------------------------
 
+def _mock_cfg(**kwargs):
+    """Return a mock config object with the given attributes."""
+    cfg = mock.MagicMock()
+    for k, v in kwargs.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
 class TestShouldMicroCompact:
     def test_disabled(self):
-        with mock.patch("src.compact.micro_compact.config") as cfg:
-            cfg.MICRO_COMPACT_ENABLED = False
+        with mock.patch("src.compact.micro_compact.config") as m:
+            m.get.return_value = _mock_cfg(micro_compact_enabled=False)
             assert should_micro_compact([]) is False
 
     def test_no_cache_always_true(self):
         msgs = [_assistant_text()]
-        with mock.patch("src.compact.micro_compact.config") as cfg:
-            cfg.MICRO_COMPACT_ENABLED = True
-            cfg.PROMPT_CACHE_ENABLED = False
+        with mock.patch("src.compact.micro_compact.config") as m:
+            m.get.return_value = _mock_cfg(
+                micro_compact_enabled=True,
+                prompt_cache_enabled=False,
+            )
             assert should_micro_compact(msgs) is True
 
     def test_cache_hot_no_compact(self):
         """Cache is warm (recent assistant message) — don't compact."""
         msgs = [Message(role="assistant", content=[TextContent(text="hi")],
                         msg_type="assistant", timestamp=time.time())]
-        with mock.patch("src.compact.micro_compact.config") as cfg:
-            cfg.MICRO_COMPACT_ENABLED = True
-            cfg.PROMPT_CACHE_ENABLED = True
-            cfg.PROMPT_CACHE_TTL_MINUTES = 5
+        with mock.patch("src.compact.micro_compact.config") as m:
+            m.get.return_value = _mock_cfg(
+                micro_compact_enabled=True,
+                prompt_cache_enabled=True,
+                prompt_cache_ttl_minutes=5,
+            )
             assert should_micro_compact(msgs) is False
 
     def test_cache_expired_do_compact(self):
@@ -243,19 +255,23 @@ class TestShouldMicroCompact:
         old_time = time.time() - 600  # 10 minutes ago
         msgs = [Message(role="assistant", content=[TextContent(text="hi")],
                         msg_type="assistant", timestamp=old_time)]
-        with mock.patch("src.compact.micro_compact.config") as cfg:
-            cfg.MICRO_COMPACT_ENABLED = True
-            cfg.PROMPT_CACHE_ENABLED = True
-            cfg.PROMPT_CACHE_TTL_MINUTES = 5
+        with mock.patch("src.compact.micro_compact.config") as m:
+            m.get.return_value = _mock_cfg(
+                micro_compact_enabled=True,
+                prompt_cache_enabled=True,
+                prompt_cache_ttl_minutes=5,
+            )
             assert should_micro_compact(msgs) is True
 
     def test_no_assistant_message(self):
         """No assistant messages — nothing to base timing on, skip."""
         msgs = [_user()]
-        with mock.patch("src.compact.micro_compact.config") as cfg:
-            cfg.MICRO_COMPACT_ENABLED = True
-            cfg.PROMPT_CACHE_ENABLED = True
-            cfg.PROMPT_CACHE_TTL_MINUTES = 5
+        with mock.patch("src.compact.micro_compact.config") as m:
+            m.get.return_value = _mock_cfg(
+                micro_compact_enabled=True,
+                prompt_cache_enabled=True,
+                prompt_cache_ttl_minutes=5,
+            )
             assert should_micro_compact(msgs) is False
 
 

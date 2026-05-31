@@ -1,0 +1,25 @@
+---
+id: fa84b094-6dd1-4bc4-95e8-58570fd0bb91
+---
+erDiagram
+    BACKEND ||--o{ asd : stores
+
+    CUSTOMER {
+        string id
+        string name
+        string email
+    }
+    ORDER {
+        string id
+        date orderDate
+        string status
+    }
+    PRODUCT {
+        string id
+        string name
+        float price
+    }
+    ORDER_ITEM {
+        int quantity
+        float price
+    }

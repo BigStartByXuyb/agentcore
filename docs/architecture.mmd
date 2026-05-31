@@ -1,0 +1,133 @@
+%% ============================================================
+%% My-Agent 完整架构图 — Mermaid 格式
+%% 用 VS Code 插件 "Markdown Preview Mermaid Support" 或
+%% "Mermaid Editor" 可直接预览和编辑
+%% 在线编辑: https://mermaid.live
+%% ============================================================
+
+%% ============================================================
+%% 图1: 整体模块依赖关系
+%% ============================================================
+graph TB
+    subgraph ENTRY["入口层"]
+        MAIN["main.py<br/>CLI REPL 入口"]
+    end
+
+    subgraph CORE["核心循环层"]
+        AL["agent_loop.py<br/>主循环 + REPL 管理<br/>消息注入 / 记忆提取"]
+        TR["tool_runner.py<br/>统一工具执行入口<br/>generator 事件冒泡"]
+    end
+
+    subgraph API_LAYER["API 抽象层"]
+        API["api.py<br/>Provider 路由分发"]
+        subgraph PROVIDERS["providers/"]
+            PBASE["base.py<br/>Provider Protocol"]
+            PANTH["anthropic/adapter.py<br/>Anthropic SDK 封装<br/>retry + stream"]
+        end
+    end
+
+    subgraph TOOLS["工具层 tools/"]
+        TREG["__init__.py<br/>ALL_TOOLS 注册表"]
+        TBASH["bash.py<br/>Shell 命令"]
+        TREAD["read_file.py<br/>文件读取"]
+        TGREP["grep.py<br/>内容搜索"]
+        TSKILL["skill.py<br/>Skill 工具<br/>inline / fork"]
+        TAGENT["agent.py<br/>Subagent 工具"]
+    end
+
+    subgraph MCP_LAYER["MCP 工具层 mcp_tool/"]
+        MCPINIT["__init__.py<br/>MCP 注册 + McpServer"]
+        MCPBASE["base.py<br/>McpClientBase 抽象"]
+        MCPHTTP["McpHttpClient.py<br/>HTTP/SSE 传输"]
+        MCPPIPE["McpPipelineClient.py<br/>Stdio 管道传输"]
+        MCPCFG["config.py<br/>mcp.json 配置加载"]
+    end
+
+    subgraph SKILL_AGENT["Skill & Agent 子系统"]
+        SKILLS["skills/__init__.py<br/>Skill 发现/加载/缓存"]
+        AGENTS["agents/__init__.py<br/>Agent 发现/加载"]
+        EXPLORE["agents/explore.py<br/>内置 Explore agent"]
+    end
+
+    subgraph MEMORY["记忆系统 memory/"]
+        MPATHS["paths.py<br/>目录路径解析"]
+        MSCAN["scan.py<br/>扫描记忆文件"]
+        MPROMPT["prompt.py<br/>行为指令构建"]
+        MRECALL["recall.py<br/>Side query 选择"]
+        MEXTRACT["extract.py<br/>后台记忆提取"]
+    end
+
+    subgraph INFRA["基础设施层"]
+        TYPES["types.py<br/>ToolResult / ToolDef<br/>ToolUseContext / AgentState"]
+        EVENTS["events.py<br/>AgentEvent 事件体系"]
+        ERRORS["errors.py<br/>错误分类 + synthetic msg"]
+        MSGS["messages.py<br/>消息构建辅助"]
+        SYSP["system_prompt.py<br/>系统提示构建"]
+        DISP["display.py<br/>终端展示层"]
+        PERM["permissions.py<br/>工具权限引擎"]
+        FM["frontmatter.py<br/>YAML frontmatter 解析"]
+        CFG["config.py<br/>环境变量 + 全局配置"]
+    end
+
+    %% 依赖关系
+    MAIN --> AL
+    MAIN --> DISP
+    MAIN --> MCPINIT
+
+    AL --> TR
+    AL --> API
+    AL --> MSGS
+    AL --> SYSP
+    AL --> EVENTS
+    AL --> SKILLS
+    AL --> AGENTS
+    AL --> MEMORY
+    AL --> PERM
+
+    TR --> TREG
+    TR --> EVENTS
+    TR --> TYPES
+    TR --> PERM
+
+    API --> PBASE
+    PANTH -.->|implements| PBASE
+
+    TREG --> TBASH
+    TREG --> TREAD
+    TREG --> TGREP
+    TREG --> TSKILL
+    TREG --> TAGENT
+    TREG --> MCPINIT
+
+    TSKILL --> SKILLS
+    TSKILL --> AL
+    TAGENT --> AL
+    TAGENT --> EXPLORE
+
+    MCPINIT --> MCPBASE
+    MCPHTTP -.->|extends| MCPBASE
+    MCPPIPE -.->|extends| MCPBASE
+    MCPINIT --> MCPCFG
+
+    SKILLS --> FM
+    AGENTS --> FM
+
+    MRECALL --> API
+    MEXTRACT --> AL
+
+    classDef entry fill:#4CAF50,color:#fff,stroke:#333
+    classDef core fill:#2196F3,color:#fff,stroke:#333
+    classDef api fill:#FF9800,color:#fff,stroke:#333
+    classDef tool fill:#9C27B0,color:#fff,stroke:#333
+    classDef mcp fill:#00BCD4,color:#fff,stroke:#333
+    classDef memory fill:#E91E63,color:#fff,stroke:#333
+    classDef infra fill:#607D8B,color:#fff,stroke:#333
+
+    class MAIN entry
+    class AL,TR core
+    class API,PBASE,PANTH api
+    class TREG,TBASH,TREAD,TGREP,TSKILL,TAGENT tool
+    class MCPINIT,MCPBASE,MCPHTTP,MCPPIPE,MCPCFG mcp
+    class SKILLS,AGENTS,EXPLORE tool
+    class MPATHS,MSCAN,MPROMPT,MRECALL,MEXTRACT memory
+    class TYPES,EVENTS,ERRORS,MSGS,SYSP,DISP,PERM,FM,CFG infra

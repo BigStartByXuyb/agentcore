@@ -36,13 +36,13 @@ from src.core.events import ThinkingBlock
 
 class TestConfig:
     def test_thinking_enabled_default(self):
-        assert config.THINKING_ENABLED is True
+        assert config.get().thinking_enabled is True
 
     def test_thinking_budget_default(self):
-        assert config.THINKING_BUDGET_TOKENS == 10000
+        assert config.get().thinking_budget_tokens == 10000
 
     def test_budget_less_than_max_tokens(self):
-        assert config.THINKING_BUDGET_TOKENS < config.MAX_TOKENS
+        assert config.get().thinking_budget_tokens < config.get().max_tokens
 
 
 # ===================================================================
@@ -91,30 +91,37 @@ class TestSerializeThinking:
 # _build_thinking_dict (Anthropic adapter level — returns API dict)
 # ===================================================================
 
+def _patch_config(**overrides):
+    """Context manager that temporarily overrides Config fields via _config."""
+    import copy
+    original = config._config
+    patched = copy.copy(original)
+    for k, v in overrides.items():
+        setattr(patched, k, v)
+    return patch.object(config, "_config", patched)
+
+
 class TestBuildThinkingDict:
     def test_enabled(self):
         from src.providers.anthropic.adapter import _build_thinking_dict
-        with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 10000):
+        with _patch_config(thinking_enabled=True, thinking_budget_tokens=10000):
             result = _build_thinking_dict(max_tokens=16384)
             assert result == {"type": "enabled", "budget_tokens": 10000}
 
     def test_disabled(self):
         from src.providers.anthropic.adapter import _build_thinking_dict
-        with patch.object(config, "THINKING_ENABLED", False):
+        with _patch_config(thinking_enabled=False):
             assert _build_thinking_dict(max_tokens=16384) is None
 
     def test_budget_capped_to_max_tokens_minus_1(self):
         from src.providers.anthropic.adapter import _build_thinking_dict
-        with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 20000):
+        with _patch_config(thinking_enabled=True, thinking_budget_tokens=20000):
             result = _build_thinking_dict(max_tokens=8000)
             assert result["budget_tokens"] == 7999
 
     def test_zero_budget_returns_none(self):
         from src.providers.anthropic.adapter import _build_thinking_dict
-        with patch.object(config, "THINKING_ENABLED", True), \
-             patch.object(config, "THINKING_BUDGET_TOKENS", 0):
+        with _patch_config(thinking_enabled=True, thinking_budget_tokens=0):
             assert _build_thinking_dict(max_tokens=100) is None
 
 

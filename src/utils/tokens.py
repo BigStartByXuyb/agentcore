@@ -32,12 +32,12 @@ def rough_estimate_messages(messages: list) -> int:
     total = 0
     for msg in messages:
         if isinstance(msg.content, str):
-            total += config.estimate_tokens(msg.content)
+            total += config.get().estimate_tokens(msg.content)
         elif isinstance(msg.content, list):
             for block in msg.content:
                 text = getattr(block, "text", None) or getattr(block, "content", None) or ""
                 if isinstance(text, str):
-                    total += config.estimate_tokens(text)
+                    total += config.get().estimate_tokens(text)
         for att in getattr(msg, "attachments", None) or []:
-            total += config.estimate_tokens(att.content)
+            total += config.get().estimate_tokens(att.content)
     return total

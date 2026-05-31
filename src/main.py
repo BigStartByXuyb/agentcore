@@ -24,7 +24,7 @@ from src.mcp_tool import register_mcp_tools, shutdown_mcp
 from src.tools import registry as tool_registry
 from src.watcher import start_watchers
 from src.session import SessionStorage
-from src.commands import CommandContext, handle_clear, handle_resume, handle_sessions, handle_plan
+from src.commands import CommandContext, handle_clear, handle_resume, handle_sessions, handle_plan, handle_settings
 
 
 def _parse_resume_arg() -> str | None:
@@ -38,13 +38,18 @@ def _parse_resume_arg() -> str | None:
 
 
 async def async_main() -> None:
-    if not config.ANTHROPIC_AUTH_TOKEN:
-        print("Error: ANTHROPIC_AUTH_TOKEN environment variable is not set.")
-        sys.exit(1)
-
     from src.sandbox import sandbox_manager
     from src.memory.paths import ensure_memory_dir
+    from src.core.settings import ensure_default_settings, validate_config
+
+    ensure_default_settings()
     ensure_memory_dir()
+
+    errors = validate_config()
+    if errors:
+        for e in errors:
+            print(f"[Config Error] {e}")
+        sys.exit(1)
     print(f"my-agent ready. {sandbox_manager.status_summary()}")
     print("Type 'exit' to quit.\n")
 
@@ -68,7 +73,7 @@ async def async_main() -> None:
 
     # --- Session storage ---
     storage: SessionStorage | None = None
-    if config.SESSION_PERSIST_ENABLED:
+    if config.get().session_persist_enabled:
         storage = SessionStorage(config.SESSION_ID)
         storage.open()
 
@@ -101,6 +106,11 @@ async def async_main() -> None:
 
             if stripped == "/sessions":
                 ctx = await handle_sessions(ctx)
+                continue
+
+            if stripped == "/settings" or stripped.startswith("/settings "):
+                arg = stripped[9:].strip() if len(stripped) > 9 else ""
+                ctx = await handle_settings(ctx, arg)
                 continue
 
             if stripped == "/plan" or stripped.startswith("/plan "):

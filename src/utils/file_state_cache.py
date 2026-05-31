@@ -150,7 +150,7 @@ class FileStateCache:
             if not snippet:
                 continue
 
-            tokens = config.estimate_tokens(snippet)
+            tokens = config.get().estimate_tokens(snippet)
             if tokens > _DIFF_SNIPPET_MAX_TOKENS:
                 snippet = _truncate_snippet(snippet)
 
@@ -235,7 +235,7 @@ def _truncate_snippet(snippet: str) -> str:
     kept: list[str] = []
     used = 0
     for line in lines:
-        lt = config.estimate_tokens(line)
+        lt = config.get().estimate_tokens(line)
         if used + lt > _DIFF_SNIPPET_MAX_TOKENS:
             break
         kept.append(line)

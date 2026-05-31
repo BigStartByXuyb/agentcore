@@ -18,6 +18,7 @@ SKILL_DEBOUNCE = 0.5   # seconds
 MEMORY_DEBOUNCE = 0.3
 MCP_DEBOUNCE = 1.0     # MCP connections are expensive — longer debounce
 PERMISSION_DEBOUNCE = 0.5
+SETTINGS_DEBOUNCE = 0.5
 
 SKILL_EXTENSIONS = {".md"}
 MEMORY_EXTENSIONS = {".md", ".txt", ".text"}
@@ -127,6 +128,18 @@ def _get_permission_config_paths() -> list[str]:
     return [p for p in get_permission_config_paths() if os.path.isfile(p)]
 
 
+def _reload_settings() -> None:
+    from src.core import config
+    config.reload()
+    from src.core.settings import validate_config
+    errors = validate_config()
+    if errors:
+        for e in errors:
+            log.warning("[watcher] Config warning: %s", e)
+            print(f"[Settings Warning] {e}")
+    log.info("[watcher] Settings reloaded.")
+
+
 def _reload_memory() -> None:
     log.info("[watcher] Memory files changed — will pick up on next recall.")
 
@@ -230,6 +243,25 @@ def start_watchers(loop: asyncio.AbstractEventLoop) -> None:
                 observer.schedule(perm_handler, parent, recursive=False)
                 watched_perm_dirs.add(parent)
                 log.info(f"Watching permissions: {p}")
+
+    # Settings file watcher
+    from src.core.settings import get_settings_file_paths
+    settings_notifier = _DebouncedNotifier(
+        loop, _reload_settings, SETTINGS_DEBOUNCE)
+    settings_paths = get_settings_file_paths()
+    if settings_paths:
+        settings_handler = _McpConfigHandler(
+            {os.path.basename(p) for p in settings_paths},
+            settings_notifier,
+        )
+        watched_settings_dirs: set[str] = set()
+        for p in settings_paths:
+            parent = os.path.dirname(p)
+            if parent not in watched_settings_dirs:
+                os.makedirs(parent, exist_ok=True)
+                observer.schedule(settings_handler, parent, recursive=False)
+                watched_settings_dirs.add(parent)
+                log.info(f"Watching settings: {p}")
 
     try:
         observer.start()

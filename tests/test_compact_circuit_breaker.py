@@ -24,7 +24,7 @@ class TestBlockingLimit:
 
     def test_at_limit(self):
         from src.core import config
-        threshold = config.MAX_CONTEXT_WINDOW - BLOCKING_LIMIT_BUFFER_TOKENS
+        threshold = config.get().max_context_window - BLOCKING_LIMIT_BUFFER_TOKENS
         assert is_at_blocking_limit(threshold) is True
 
     def test_above_limit(self):

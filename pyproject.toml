@@ -1,0 +1,10 @@
+[project]
+name = "my-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["anthropic>=0.90.0", "openai>=1.0.0", "pyyaml>=6.0", "watchdog>=4.0", "pydantic>=2.0"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+pythonPlatform = "Windows"
+extraPaths = ["src"]

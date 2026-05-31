@@ -79,9 +79,9 @@ def _extract_retry_after(error: Exception) -> float | None:
 
 def _build_thinking_dict(max_tokens: int) -> dict | None:
     """Build Anthropic-specific thinking param from config, or None if disabled."""
-    if not config.THINKING_ENABLED:
+    if not config.get().thinking_enabled:
         return None
-    budget = min(config.THINKING_BUDGET_TOKENS, max_tokens - 1)
+    budget = min(config.get().thinking_budget_tokens, max_tokens - 1)
     if budget <= 0:
         return None
     return {"type": "enabled", "budget_tokens": budget}
@@ -115,8 +115,8 @@ class AnthropicAdapter:
     def get_client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
             self._client = anthropic.AsyncAnthropic(
-                api_key=config.ANTHROPIC_AUTH_TOKEN,
-                base_url=config.ANTHROPIC_BASE_URL,
+                api_key=config.get().anthropic_auth_token,
+                base_url=config.get().anthropic_base_url,
                 max_retries=0,
             )
         return self._client
@@ -139,8 +139,8 @@ class AnthropicAdapter:
     ) -> ProviderMessage:
         """Single API call — no retry (api.py handles that)."""
         client = self.get_client()
-        resolved_model = model or config.MODELS.main
-        resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        resolved_model = model or config.get().models.main
+        resolved_max_tokens = max_tokens or config.get().max_tokens
         api_messages = converter.messages_to_anthropic(messages)
 
         thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None
@@ -174,8 +174,8 @@ class AnthropicAdapter:
     ) -> _AnthropicStream:
         """Open a streaming connection — no retry (api.py handles that)."""
         client = self.get_client()
-        resolved_model = model or config.MODELS.main
-        resolved_max_tokens = max_tokens or config.MAX_TOKENS
+        resolved_model = model or config.get().models.main
+        resolved_max_tokens = max_tokens or config.get().max_tokens
         api_messages = converter.messages_to_anthropic(messages)
 
         thinking_dict = _build_thinking_dict(resolved_max_tokens) if thinking else None

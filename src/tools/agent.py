@@ -135,12 +135,12 @@ async def _execute(inputs: dict, context: ToolUseContext) -> ToolResult:
         agent_def = _DEFAULT_AGENT
 
     # --- Depth check ---
-    if context.depth >= config.MAX_AGENT_DEPTH:
+    if context.depth >= config.get().max_agent_depth:
         return ToolResult(data={
             "success": False,
             "agent_name": agent_def.name,
             "error": (
-                f"Maximum agent nesting depth ({config.MAX_AGENT_DEPTH}) reached. "
+                f"Maximum agent nesting depth ({config.get().max_agent_depth}) reached. "
                 f"Cannot launch agent '{agent_def.name}' at depth {context.depth}."
             ),
         })

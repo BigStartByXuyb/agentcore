@@ -99,12 +99,12 @@ async def _execute(
 
     # --- Fork mode ---
     if skill.is_fork:
-        if context.depth >= config.MAX_AGENT_DEPTH:
+        if context.depth >= config.get().max_agent_depth:
             return ToolResult(data={
                 "success": False,
                 "error": (
                     f"Fork skill '{skill_name}' cannot be invoked: "
-                    f"maximum agent depth ({config.MAX_AGENT_DEPTH}) reached "
+                    f"maximum agent depth ({config.get().max_agent_depth}) reached "
                     f"(current depth: {context.depth})."
                 ),
             })
@@ -254,7 +254,7 @@ async def _execute_fork(
 
         result = await run_agent_loop(
             tool_use_context=sub_context,
-            max_turns=config.MAX_TURNS,
+            max_turns=config.get().max_turns,
             query_source="subagent",
             on_event=context.on_event,
         )

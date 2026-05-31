@@ -79,11 +79,11 @@ class SandboxManager:
     def _get_config(self) -> SandboxConfig:
         if self._config is None:
             self._config = SandboxConfig(
-                enabled=config.SANDBOX_ENABLED,
-                allow_write=list(config.SANDBOX_ALLOW_WRITE),
-                deny_write=list(config.SANDBOX_DENY_WRITE),
-                deny_read=list(config.SANDBOX_DENY_READ),
-                excluded_commands=list(config.SANDBOX_EXCLUDED_COMMANDS),
+                enabled=config.get().sandbox_enabled,
+                allow_write=list(config.get().sandbox_allow_write),
+                deny_write=list(config.get().sandbox_deny_write),
+                deny_read=list(config.get().sandbox_deny_read),
+                excluded_commands=list(config.get().sandbox_excluded_commands),
             )
         return self._config
 

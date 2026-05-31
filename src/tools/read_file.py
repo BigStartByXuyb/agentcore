@@ -156,7 +156,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
     content = "\n".join(numbered)
 
     # --- output token estimate gate ---
-    estimated_tokens = config.estimate_tokens(content)
+    estimated_tokens = config.get().estimate_tokens(content)
     if estimated_tokens > MAX_OUTPUT_TOKENS:
         return ToolResult(data={
             "type": "error",

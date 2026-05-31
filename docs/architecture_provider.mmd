@@ -1,0 +1,56 @@
+%% ============================================================
+%% My-Agent Provider 抽象层
+%% ============================================================
+
+graph TB
+    subgraph PROVIDER_SYS["Provider 多后端架构"]
+        direction TB
+
+        API["api.py<br/>Provider 路由分发"]
+
+        subgraph PROTOCOL["Provider Protocol (base.py)"]
+            direction LR
+            CM["create_message()<br/>→ awaitable, 返回 Message"]
+            SM["stream_message()<br/>→ async context manager<br/>→ text_stream + get_final_message"]
+            SQ["side_query()<br/>→ 轻量调用 (记忆/分类)"]
+        end
+
+        subgraph IMPL["已实现"]
+            ANTH["anthropic/adapter.py<br/>Anthropic SDK 原生<br/>无格式转换"]
+        end
+
+        subgraph FUTURE["未来扩展 (预留接口)"]
+            OAI["openai-compat/<br/>OpenAI 兼容 API"]
+            GOOGLE["google/<br/>Gemini API"]
+            LOCAL["local/<br/>本地模型"]
+        end
+
+        API --> PROTOCOL
+        ANTH -.->|implements| PROTOCOL
+        OAI -.->|implements| PROTOCOL
+        GOOGLE -.->|implements| PROTOCOL
+        LOCAL -.->|implements| PROTOCOL
+
+        ANTH -->|"duck-typing<br/>所有下游按 Anthropic 格式处理"| DUCK["Message 统一格式<br/>.content / .stop_reason<br/>.usage.input_tokens"]
+    end
+
+    subgraph RETRY["重试机制 (adapter.py)"]
+        direction LR
+        R1["429 Rate Limit → 指数退避"]
+        R2["529 Overloaded → 指数退避"]
+        R3["5xx Server Error → 指数退避"]
+        R4["Connection Error → 重试"]
+        R5["400/401 → 立即抛出"]
+    end
+
+    classDef api fill:#FF9800,color:#fff
+    classDef proto fill:#3F51B5,color:#fff
+    classDef impl fill:#4CAF50,color:#fff
+    classDef future fill:#9E9E9E,color:#fff
+    classDef retry fill:#F44336,color:#fff
+
+    class API api
+    class CM,SM,SQ proto
+    class ANTH impl
+    class OAI,GOOGLE,LOCAL future
+    class R1,R2,R3,R4,R5 retry

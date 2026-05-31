@@ -48,7 +48,7 @@ async def find_relevant_memories(
     Returns up to MEMORY_MAX_RELEVANT MemoryHeader objects.
     Returns empty list on any failure (non-critical path).
     """
-    if not config.MEMORY_ENABLED:
+    if not config.get().memory_enabled:
         return []
 
     headers = scan_memory_files(memory_dir)
@@ -68,7 +68,7 @@ async def find_relevant_memories(
         manifest = format_memory_manifest(headers)
 
         response = await query_model(
-            model=config.MODELS.side_query,
+            model=config.get().models.side_query,
             system=_SELECT_MEMORIES_SYSTEM_PROMPT,
             messages=[Message(
                 role="user",
@@ -99,7 +99,7 @@ async def find_relevant_memories(
             for fn in selected_filenames
             if fn in by_filename
         ]
-        return result[:config.MEMORY_MAX_RELEVANT]
+        return result[:config.get().memory_max_relevant]
 
     except Exception as e:
         logger.debug("find_relevant_memories failed (non-critical): %s", e)

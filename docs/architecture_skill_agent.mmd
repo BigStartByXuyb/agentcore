@@ -1,0 +1,61 @@
+%% ============================================================
+%% My-Agent Skill & Agent 子系统
+%% ============================================================
+
+graph TB
+    subgraph SKILL_SYS["Skill 系统"]
+        direction TB
+
+        SD["skills/__init__.py<br/>discover_skills()"]
+        SD -->|扫描 SKILL.md| FM["frontmatter.py<br/>解析 YAML header"]
+        FM --> SI["Skill 实例<br/>name / description / isfork<br/>allow_tools / body"]
+
+        SI --> INLINE["inline 模式<br/>(isfork=False)"]
+        SI --> FORK["fork 模式<br/>(isfork=True)"]
+
+        INLINE -->|返回| IR["ToolResult:<br/>data + new_messages + context_modifier"]
+        IR -->|注入| SKILL_CONTENT["user msg:<br/>&lt;skill-content&gt;...&lt;/skill-content&gt;"]
+        IR -->|限制工具| CTX_MOD["context_modifier:<br/>allowed_tools 白名单"]
+
+        FORK -->|启动子循环| SUB_LOOP["run_agent_loop()<br/>独立消息 + system_prompt"]
+        SUB_LOOP -->|yield from| BUBBLE["事件冒泡到父层"]
+        SUB_LOOP -->|return| FR["ToolResult:<br/>data (含 result 文本)"]
+    end
+
+    subgraph AGENT_SYS["Agent 子系统"]
+        direction TB
+
+        AD["agents/__init__.py<br/>discover_agents()"]
+        AD -->|扫描 AGENT.md| FM2["frontmatter.py"]
+        FM2 --> AI["Agent 实例<br/>name / description / system_prompt<br/>max_turns / allowed_tools<br/>disallowed_tools / skills"]
+
+        AI --> FILTER["两层过滤"]
+        FILTER --> L1["Layer 1: Tool 大类<br/>allowed → exclude agent → subtract disallowed"]
+        FILTER --> L2["Layer 2: Skill 实例<br/>skills 白名单 → filter listing"]
+
+        AI --> AEXEC["agent.py executor"]
+        AEXEC -->|启动子循环| ASUB["run_agent_loop()<br/>独立 system_prompt + tools"]
+        ASUB -->|yield from| ABUBBLE["事件冒泡"]
+        ASUB -->|return| AR["ToolResult:<br/>agent_name + result"]
+
+        BUILTIN["内置 Agent"]
+        EXPLORE["explore.py<br/>Explore Agent<br/>tools: bash, read_file, grep"]
+        BUILTIN --> EXPLORE
+    end
+
+    subgraph REMINDER["注入机制"]
+        direction LR
+        SLIST["Skill 列表<br/>&lt;system-reminder&gt;"]
+        ALIST["Agent 列表<br/>&lt;system-reminder&gt;"]
+        INJECT["agent_loop 每轮注入<br/>到 user 消息中"]
+        SLIST --> INJECT
+        ALIST --> INJECT
+    end
+
+    classDef skill fill:#E91E63,color:#fff
+    classDef agent fill:#2196F3,color:#fff
+    classDef inject fill:#FF9800,color:#fff
+
+    class SD,SI,INLINE,FORK,IR,SKILL_CONTENT,CTX_MOD,SUB_LOOP,BUBBLE,FR skill
+    class AD,AI,FILTER,L1,L2,AEXEC,ASUB,ABUBBLE,AR,BUILTIN,EXPLORE agent
+    class SLIST,ALIST,INJECT inject

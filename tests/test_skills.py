@@ -411,7 +411,7 @@ def test_skill_executor_fork_depth_limit():
     _load_fixtures()
 
     from src.core import config
-    max_depth = config.MAX_AGENT_DEPTH
+    max_depth = config.get().max_agent_depth
 
     ctx = ToolUseContext(messages=MessageHistory([]), tools=["bash", "Skill"], depth=max_depth)
 

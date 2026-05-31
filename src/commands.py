@@ -1,4 +1,4 @@
-"""Built-in slash commands (/clear, /resume, /sessions, /plan).
+"""Built-in slash commands (/clear, /resume, /sessions, /plan, /settings).
 
 Each command is a standalone async function that receives and returns
 a CommandContext — the mutable session state bundle. This keeps main.py
@@ -51,7 +51,7 @@ async def handle_clear(ctx: CommandContext) -> CommandContext:
     ctx.state = AgentState()
     ctx.file_cache = FileStateCache()
 
-    if config.SESSION_PERSIST_ENABLED:
+    if config.get().session_persist_enabled:
         ctx.storage = SessionStorage(config.SESSION_ID)
         ctx.storage.open()
     else:
@@ -139,6 +139,65 @@ def handle_plan(ctx: CommandContext, arg: str = "") -> tuple[CommandContext, str
         return ctx, None
 
     return ctx, arg
+
+
+async def handle_settings(ctx: CommandContext, arg: str = "") -> CommandContext:
+    """Handle /settings subcommands."""
+    from src.core.settings import (
+        get_settings_paths, create_project_settings,
+        reset_user_settings,
+    )
+
+    sub = arg.strip().lower()
+
+    if not sub:
+        # Show current effective config
+        cfg = config.get()
+        user_path, project_path = get_settings_paths()
+        import os
+        print("Current settings (merged):")
+        print(f"  provider:              {cfg.provider}")
+        print(f"  model:                 {cfg.model}")
+        print(f"  max_tokens:            {cfg.max_tokens}")
+        print(f"  max_context_window:    {cfg.max_context_window}")
+        print(f"  max_turns:             {cfg.max_turns}")
+        print(f"  max_agent_depth:       {cfg.max_agent_depth}")
+        print(f"  thinking_enabled:      {cfg.thinking_enabled}")
+        print(f"  thinking_budget_tokens:{cfg.thinking_budget_tokens}")
+        print(f"  memory_enabled:        {cfg.memory_enabled}")
+        print(f"  memory_max_files:      {cfg.memory_max_files}")
+        print(f"  memory_max_relevant:   {cfg.memory_max_relevant}")
+        print(f"  session_persist:       {cfg.session_persist_enabled}")
+        print(f"  micro_compact_enabled: {cfg.micro_compact_enabled}")
+        print(f"  micro_compact_keep:    {cfg.micro_compact_keep_recent}")
+        print(f"  auto_compact_tokens:   {cfg.auto_compact_max_tokens}")
+        print(f"  sandbox_enabled:       {cfg.sandbox_enabled}")
+        print(f"\n  User:    {user_path} {'✓' if os.path.isfile(user_path) else '(not found)'}")
+        print(f"  Project: {project_path} {'✓' if os.path.isfile(project_path) else '(not created)'}")
+
+    elif sub == "init":
+        path = create_project_settings()
+        print(f"Project settings created: {path}")
+
+    elif sub == "reset":
+        path = reset_user_settings()
+        config.reload()
+        print(f"User settings reset to defaults: {path}")
+
+    elif sub == "path":
+        user_path, project_path = get_settings_paths()
+        import os
+        print(f"  User:    {user_path} {'✓' if os.path.isfile(user_path) else '(not found)'}")
+        print(f"  Project: {project_path} {'✓' if os.path.isfile(project_path) else '(not created)'}")
+
+    else:
+        print("Usage: /settings [init|reset|path]")
+        print("  (no arg)  Show current effective settings")
+        print("  init      Create project-level settings.json")
+        print("  reset     Reset user-level settings to defaults")
+        print("  path      Show settings file paths")
+
+    return ctx
 
 
 # ---------------------------------------------------------------------------

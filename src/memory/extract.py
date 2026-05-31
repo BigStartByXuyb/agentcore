@@ -115,7 +115,7 @@ async def run_memory_extraction(
     on_event: EventCallback | None = None,
 ) -> None:
     """Extract memories from conversation, emitting events via on_event."""
-    if not config.MEMORY_ENABLED:
+    if not config.get().memory_enabled:
         return
 
     mem_dir = memory_dir or get_memory_dir()

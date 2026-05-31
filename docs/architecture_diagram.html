@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>My Agent — 流程架构图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', system-ui, sans-serif; padding: 24px; }
+  h1 { text-align: center; font-size: 28px; margin-bottom: 8px; color: #58a6ff; }
+  .subtitle { text-align: center; color: #8b949e; margin-bottom: 32px; font-size: 14px; }
+  .diagram-section { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; margin-bottom: 24px; }
+  .diagram-section h2 { color: #58a6ff; font-size: 18px; margin-bottom: 16px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+  .mermaid { display: flex; justify-content: center; }
+  .legend { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; margin-top: 16px; font-size: 13px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1f6feb',
+      primaryTextColor: '#c9d1d9',
+      primaryBorderColor: '#388bfd',
+      lineColor: '#58a6ff',
+      secondaryColor: '#161b22',
+      tertiaryColor: '#21262d',
+      fontSize: '14px'
+    },
+    flowchart: { curve: 'basis', padding: 16 }
+  });
+</script>
+</head>
+<body>
+
+<h1>My Agent — 流程架构图</h1>
+<p class="subtitle">基于 Claude Code 源码架构的 Python Agent 系统 &nbsp;|&nbsp; Python 3.12+ &nbsp;|&nbsp; anthropic SDK &nbsp;|&nbsp; claude-sonnet-4-6</p>
+
+<!-- ========== 1. 整体架构 ========== -->
+<div class="diagram-section">
+<h2>1. 整体模块架构</h2>
+<pre class="mermaid">
+graph TB
+    subgraph Entry["入口层"]
+        MAIN["main.py<br/>CLI 入口 + REPL"]
+    end
+
+    subgraph Core["核心层"]
+        AL["agent_loop.py<br/>run_agent_loop() Generator<br/>+ agent_loop() 顶层入口"]
+        TR["tool_runner.py<br/>run_tool_use() Generator<br/>支持事件冒泡"]
+        MSG["messages.py<br/>消息构建 / Schema / Thinking 清洗"]
+        SP["system_prompt.py<br/>System Prompt 构建"]
+        API["api.py<br/>query_model + create_stream_with_retry"]
+    end
+
+    subgraph Events["事件系统"]
+        EV["events.py<br/>AgentEvent 层级"]
+        DP["display.py<br/>consume_events + default_handler"]
+    end
+
+    subgraph Types["数据结构层"]
+        T1["ToolResult"]
+        T2["ToolUseContext"]
+        T3["AgentState"]
+        T4["MessageHistory"]
+        T5["ToolDef"]
+    end
+
+    subgraph Tools["工具层 — ALL_TOOLS 注册表"]
+        BASH["bash.py<br/>Shell 命令执行"]
+        RF["read_file.py<br/>文件读取"]
+        GREP["grep.py<br/>内容搜索"]
+        SK["skill.py<br/>Skill 工具"]
+        AG["agent.py<br/>Subagent 工具"]
+    end
+
+    subgraph Skills["Skill 系统"]
+        SD["skills/ 目录<br/>SKILL.md 文件"]
+        SL["skills/__init__.py<br/>discover + build + reminder"]
+    end
+
+    subgraph Agents["Agent 定义"]
+        AD["agents/__init__.py<br/>discover + load + reminder"]
+        AE["agents/explore.py<br/>Explore Agent"]
+    end
+
+    subgraph Config["配置层"]
+        CFG["config.py<br/>环境变量 + 常量"]
+        ERR["errors.py<br/>错误分类 + synthetic 消息"]
+        FM["frontmatter.py<br/>YAML 解析"]
+    end
+
+    MAIN --> AL
+    AL --> API
+    AL --> TR
+    AL --> MSG
+    AL --> SP
+    AL --> SL
+    AL --> AD
+    AL --> DP
+    AL -.->|yield| EV
+    TR -.->|yield| EV
+    DP -.->|consume| EV
+    TR --> Tools
+    SK --> SL
+    SK -.->|fork: yield from| AL
+    AG --> AD
+    AG --> AE
+    AG -.->|yield from 子循环| AL
+    Tools --> T1
+    Tools --> T2
+    AL --> T3
+    AL --> T4
+    SL --> SD
+    SL --> FM
+    AD --> FM
+
+    style Entry fill:#1a1e24,stroke:#388bfd
+    style Core fill:#1a1e24,stroke:#f0883e
+    style Events fill:#1a1e24,stroke:#f778ba
+    style Types fill:#1a1e24,stroke:#a371f7
+    style Tools fill:#1a1e24,stroke:#3fb950
+    style Skills fill:#1a1e24,stroke:#d2a8ff
+    style Agents fill:#1a1e24,stroke:#79c0ff
+    style Config fill:#1a1e24,stroke:#8b949e
+</pre>
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#388bfd"></div>入口层</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f0883e"></div>核心层</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f778ba"></div>事件系统</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a371f7"></div>数据结构</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div>工具层</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#d2a8ff"></div>Skill 系统</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#79c0ff"></div>Agent 定义</div>
+</div>
+</div>
+
+<!-- ========== 2. Agent Loop 主循环流程 ========== -->
+<div class="diagram-section">
+<h2>2. Agent Loop 主循环流程（Generator 模式）</h2>
+<pre class="mermaid">
+flowchart TD
+    A["用户输入"] --> B["agent_loop():<br/>注入 skill/agent reminder"]
+    B --> C["run_agent_loop() Generator"]
+    C --> D["调用 LLM API<br/>stream: yield from _stream_call()<br/>逐 token yield TextDelta"]
+    D --> E{stop_reason?}
+    E -->|end_turn| F["yield TokenUsage<br/>return 最终文本"]
+    E -->|tool_use| G["遍历 tool_use blocks"]
+    G --> H["yield ToolStart"]
+    H --> I["yield from run_tool_use()<br/>普通 executor: 直接返回<br/>generator executor: 冒泡子事件"]
+    I --> J["yield ToolEnd<br/>is_error + result_summary"]
+    J --> K["收集 tool_result + new_messages"]
+    K --> L{有 new_messages?}
+    L -->|否| D
+    L -->|是| M["插入 assistant 占位<br/>注入 skill-content"]
+    M --> N{有 context_modifier?}
+    N -->|是| O["应用 modifier<br/>重建 tool schemas"]
+    N -->|否| D
+    O --> D
+    C --> P["consume_events(gen, default_handler)<br/>迭代事件 → 打印终端 → 返回文本"]
+
+    style A fill:#1f6feb,stroke:#388bfd,color:#fff
+    style F fill:#3fb950,stroke:#2ea043,color:#fff
+    style H fill:#f778ba,stroke:#d63384,color:#fff
+    style I fill:#f0883e,stroke:#d18616,color:#fff
+    style J fill:#f778ba,stroke:#d63384,color:#fff
+    style P fill:#a371f7,stroke:#8957e5,color:#fff
+</pre>
+</div>
+
+<!-- ========== 3. 工具执行数据流 ========== -->
+<div class="diagram-section">
+<h2>3. 工具执行数据流 — run_tool_use() Generator</h2>
+<pre class="mermaid">
+flowchart LR
+    LLM["LLM 返回<br/>tool_use block"] --> LOOKUP["ALL_TOOLS[name]<br/>查找 ToolDef"]
+    LOOKUP --> CHECK{"hasattr(__next__)?"}
+    CHECK -->|"否 — 普通 executor<br/>bash/read_file/grep"| EXEC["executor(inputs, ctx)<br/>→ ToolResult 直接返回"]
+    CHECK -->|"是 — generator executor<br/>agent/fork skill"| GEN["yield from executor<br/>冒泡子 agent 事件<br/>StopIteration.value → ToolResult"]
+    EXEC --> DATA["ToolResult.data"]
+    GEN --> DATA
+    DATA --> MAP["map_result(data)<br/>→ llm_text"]
+    MAP --> RET["return (ToolResult, llm_text, is_error)"]
+
+    DATA --> NM["new_messages<br/>Skill 注入"]
+    DATA --> CM["context_modifier<br/>修改上下文"]
+
+    style LLM fill:#1f6feb,stroke:#388bfd,color:#fff
+    style CHECK fill:#f778ba,stroke:#d63384,color:#fff
+    style EXEC fill:#3fb950,stroke:#2ea043,color:#fff
+    style GEN fill:#f0883e,stroke:#d18616,color:#fff
+    style MAP fill:#3fb950,stroke:#2ea043,color:#fff
+    style NM fill:#a371f7,stroke:#8957e5,color:#fff
+    style CM fill:#d2a8ff,stroke:#a371f7,color:#000
+</pre>
+</div>
+
+<!-- ========== 4. Skill 两种模式 ========== -->
+<div class="diagram-section">
+<h2>4. Skill 执行模式对比</h2>
+<pre class="mermaid">
+flowchart TB
+    SK["Skill 工具被调用"] --> CHECK{isfork?}
+
+    CHECK -->|"False — inline 模式"| INL["返回 ToolResult"]
+    INL --> INL1["data: success + inline"]
+    INL --> INL2["new_messages:<br/>skill-content 注入主循环"]
+    INL --> INL3["context_modifier:<br/>限制可用工具"]
+    INL2 --> MAIN["主 Agent Loop<br/>继续执行 Skill 指令"]
+
+    CHECK -->|"True — fork 模式"| FORK["yield from _execute_fork()"]
+    FORK --> SUB["yield from run_agent_loop()<br/>子 agent 事件冒泡到父层"]
+    SUB --> FRES["返回 ToolResult"]
+    FRES --> FRES1["data: success + forked + result"]
+    FRES --> FRES2["无 new_messages"]
+    FRES --> FRES3["无 context_modifier"]
+    FRES1 --> BACK2["结果返回主循环"]
+
+    style SK fill:#a371f7,stroke:#8957e5,color:#fff
+    style INL fill:#1f6feb,stroke:#388bfd,color:#fff
+    style FORK fill:#f0883e,stroke:#d18616,color:#fff
+    style MAIN fill:#3fb950,stroke:#2ea043,color:#fff
+    style BACK2 fill:#3fb950,stroke:#2ea043,color:#fff
+</pre>
+</div>
+
+<!-- ========== 5. 文件结构 ========== -->
+<div class="diagram-section">
+<h2>5. 项目文件结构</h2>
+<pre class="mermaid">
+graph LR
+    subgraph src["src/"]
+        direction TB
+        M1["main.py — CLI 入口"]
+        M2["agent_loop.py — 主循环 Generator"]
+        M3["tool_runner.py — 工具执行 Generator"]
+        M4["api.py — API 调用 + stream"]
+        M5["messages.py — 消息构建"]
+        M6["system_prompt.py — Prompt"]
+        M7["types.py — 数据结构"]
+        M8["config.py — 配置"]
+        M9["errors.py — 错误处理"]
+        M10["frontmatter.py — YAML"]
+        M11["events.py — AgentEvent 层级"]
+        M12["display.py — 终端展示"]
+    end
+
+    subgraph tools["src/tools/"]
+        direction TB
+        T1["bash.py"]
+        T2["read_file.py"]
+        T3["grep.py"]
+        T4["skill.py"]
+        T5["agent.py"]
+        T6["__init__.py — ALL_TOOLS"]
+    end
+
+    subgraph other["其他"]
+        direction TB
+        O1["src/skills/ — Skill 加载"]
+        O2["src/agents/ — Agent 发现/加载"]
+        O3["skills/ — SKILL.md 文件"]
+        O4["agents/ — AGENT.md 文件"]
+        O5["tests/ — 测试 (115)"]
+        O6["docs/ — 文档"]
+    end
+
+    style src fill:#161b22,stroke:#f0883e
+    style tools fill:#161b22,stroke:#3fb950
+    style other fill:#161b22,stroke:#a371f7
+</pre>
+</div>
+
+<!-- ========== 6. 事件冒泡链 ========== -->
+<div class="diagram-section">
+<h2>6. 事件冒泡链 — yield from 透传</h2>
+<pre class="mermaid">
+flowchart TB
+    subgraph Terminal["终端展示"]
+        DH["default_handler()<br/>print TextDelta / ToolStart / ToolEnd / ..."]
+    end
+
+    subgraph Main["consume_events(gen, handler)"]
+        CE["迭代 AgentEvent → 分发给 handler<br/>StopIteration.value → 返回最终文本"]
+    end
+
+    subgraph Loop["run_agent_loop (主 agent)"]
+        direction TB
+        SD["yield TextDelta — 流式模式<br/>stream=True 时逐 token"]
+        TB["yield TextBlock — 非流式模式<br/>stream=False 时整段返回"]
+        ST["yield ToolStart"]
+        YF["yield from run_tool_use()"]
+        TE["yield ToolEnd"]
+        TU["yield TokenUsage"]
+    end
+
+    subgraph Runner["run_tool_use() Generator"]
+        direction TB
+        CHK{"hasattr(__next__)?"}
+        PLAIN["普通 executor<br/>直接返回 ToolResult<br/>无事件 yield"]
+        GEXEC["yield from executor<br/>透传子 agent 事件"]
+    end
+
+    subgraph Sub["子 agent: run_agent_loop"]
+        direction TB
+        S_TD["yield TextDelta"]
+        S_TS["yield ToolStart"]
+        S_TE["yield ToolEnd"]
+    end
+
+    DH --> CE
+    CE --> Loop
+    SD --> CE
+    TB --> CE
+    ST --> CE
+    YF --> Runner
+    TE --> CE
+    TU --> CE
+    CHK -->|否| PLAIN
+    CHK -->|是| GEXEC
+    GEXEC --> Sub
+    S_TD -.->|冒泡| CE
+    S_TS -.->|冒泡| CE
+    S_TE -.->|冒泡| CE
+
+    style Terminal fill:#1a1e24,stroke:#f778ba
+    style Main fill:#1a1e24,stroke:#a371f7
+    style Loop fill:#1a1e24,stroke:#f0883e
+    style Runner fill:#1a1e24,stroke:#3fb950
+    style Sub fill:#1a1e24,stroke:#79c0ff
+</pre>
+</div>
+
+<!-- ========== 7. 错误处理流程 ========== -->
+<div class="diagram-section">
+<h2>7. 错误处理流程</h2>
+<pre class="mermaid">
+flowchart TD
+    API_CALL["调用 LLM API<br/>query_model / create_stream_with_retry"]
+
+    subgraph API_LAYER["api.py 重试层"]
+        direction TB
+        API_TRY["发送请求"] --> API_CHK{异常类型?}
+        API_CHK -->|"retryable<br/>429 / 529 / 5xx / 连接错误"| API_RETRY["指数退避重试<br/>最多 3 次<br/>yield RetryNotice"]
+        API_RETRY --> API_EXHAUST{重试耗尽?}
+        API_EXHAUST -->|否| API_TRY
+        API_EXHAUST -->|是| API_RAISE["raise 异常"]
+        API_CHK -->|"non-retryable<br/>400 / 401 / 403 等"| API_RAISE
+        API_CHK -->|成功| API_OK["返回 response"]
+    end
+
+    API_CALL --> API_LAYER
+
+    subgraph LOOP_LAYER["agent_loop.py 错误处理层"]
+        direction TB
+        LOOP_CATCH["捕获异常"] --> THINK{"_is_thinking_400()?"}
+        THINK -->|是| STRIP["strip thinking blocks<br/>+ filter orphaned messages"]
+        STRIP --> LOOP_RETRY["重试一次<br/>（再走一遍 api.py 重试层）"]
+        LOOP_RETRY --> LOOP_ERR{又失败?}
+        LOOP_ERR -->|否| LOOP_OK["正常处理 response"]
+        LOOP_ERR -->|是| SYNTH["create_assistant_error_message()<br/>内部调 classify_api_error()<br/>注入 synthetic assistant 消息"]
+        THINK -->|否| SYNTH
+        SYNTH --> ERR_EVT["yield ErrorEvent<br/>return 错误文本"]
+    end
+
+    API_RAISE --> LOOP_LAYER
+    API_OK --> NORMAL["正常处理 response"]
+
+    TOOL_CALL["工具执行"] --> TOOL_ERR{executor 异常?}
+    TOOL_ERR -->|否| MAP["map_result(data)"]
+    TOOL_ERR -->|是| TERR["is_error=True<br/>tool_use_error 包裹"]
+    MAP --> MAP_ERR{map_result 异常?}
+    MAP_ERR -->|否| OK["return (ToolResult, text, False)"]
+    MAP_ERR -->|是| TERR
+
+    style API_LAYER fill:#1a1e24,stroke:#79c0ff
+    style LOOP_LAYER fill:#1a1e24,stroke:#f0883e
+    style API_RETRY fill:#a371f7,stroke:#8957e5,color:#fff
+    style SYNTH fill:#f0883e,stroke:#d18616,color:#fff
+    style STRIP fill:#a371f7,stroke:#8957e5,color:#fff
+    style TERR fill:#f85149,stroke:#da3633,color:#fff
+    style OK fill:#3fb950,stroke:#2ea043,color:#fff
+    style NORMAL fill:#3fb950,stroke:#2ea043,color:#fff
+    style LOOP_OK fill:#3fb950,stroke:#2ea043,color:#fff
+</pre>
+</div>
+
+</body>
+</html>

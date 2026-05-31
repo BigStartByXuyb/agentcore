@@ -33,13 +33,13 @@ BLOCKING_LIMIT_BUFFER_TOKENS = 3_000
 
 def should_auto_compact(estimated_tokens: int) -> bool:
     """Check if estimated token count is near context window limit."""
-    threshold = config.MAX_CONTEXT_WINDOW - AUTOCOMPACT_BUFFER_TOKENS
+    threshold = config.get().max_context_window - AUTOCOMPACT_BUFFER_TOKENS
     return estimated_tokens >= threshold
 
 
 def is_at_blocking_limit(estimated_tokens: int) -> bool:
     """Check if tokens are at the hard limit — too dangerous to call API."""
-    return estimated_tokens >= config.MAX_CONTEXT_WINDOW - BLOCKING_LIMIT_BUFFER_TOKENS
+    return estimated_tokens >= config.get().max_context_window - BLOCKING_LIMIT_BUFFER_TOKENS
 
 
 def _messages_to_prepared(messages: list[Message]) -> list[Message]:

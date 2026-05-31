@@ -1,0 +1,47 @@
+sequenceDiagram
+    participant U as 用户 (REPL)
+    participant M as main.py
+    participant AL as agent_loop
+    participant API as api.py → Anthropic
+    participant TR as tool_runner
+    participant T as Tool (executor)
+    participant D as display.py
+
+    U->>M: 输入消息
+    M->>AL: agent_loop(user_input)
+
+    Note over AL: 注入 skill/agent reminder<br/>注入记忆上下文
+
+    loop LLM ↔ Tool 循环
+        AL->>API: stream_message(messages, tools)
+        API-->>AL: yield TextDelta (逐 token)
+        AL-->>D: yield TextDelta → 终端打印
+
+        alt stop_reason == end_turn
+            AL-->>D: yield TokenUsage
+            AL->>M: return 最终文本
+        else stop_reason == tool_use
+            loop 每个 tool_use block
+                AL->>TR: run_tool_use(name, input, id)
+                TR->>T: executor(inputs, ctx)
+
+                alt 普通 executor
+                    T->>TR: return ToolResult
+                else generator executor (agent/fork)
+                    T-->>TR: yield AgentEvent (冒泡)
+                    TR-->>AL: yield from (事件透传)
+                    AL-->>D: yield → 终端打印
+                    T->>TR: return ToolResult
+                end
+
+                TR->>TR: map_result(data) → LLM 文本
+                TR->>AL: return (result, text, is_error)
+            end
+
+            Note over AL: 拼接消息:<br/>1. assistant msg (text + tool_use)<br/>2. user msg (tool_result)<br/>3. new_messages (if skill inline)
+        end
+    end
+
+    Note over AL: 后台记忆提取 (extract.py)
+    AL->>M: return 最终文本
+    M->>U: 显示结果

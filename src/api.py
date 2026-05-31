@@ -114,7 +114,7 @@ async def query_model_stream(
     The yield of StreamingFallbackEvent pauses this generator. The consumer
     (agent_loop) discards partial state, then resumes us at ``continue``.
     """
-    adapter = get_provider(config.PROVIDER)
+    adapter = get_provider(config.get().provider)
     api_stream: ProviderStream | None = None
     streaming = True
 
@@ -169,7 +169,7 @@ async def query_model_stream(
                         pass
                     api_stream = None
 
-                if streaming and not config.DISABLE_STREAMING_FALLBACK:
+                if streaming and not config.get().disable_streaming_fallback:
                     logger.warning("Streaming failed: %s; falling back to non-streaming", e)
                     streaming = False
                     yield StreamingFallbackEvent()
@@ -213,7 +213,7 @@ async def query_model(
     Never raises — all errors are returned as ProviderMessage(is_error=True),
     matching query_model_stream's error-as-message pattern.
     """
-    adapter = get_provider(config.PROVIDER)
+    adapter = get_provider(config.get().provider)
 
     try:
         result: ProviderMessage | None = None

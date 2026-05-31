@@ -37,7 +37,7 @@ def build_memory_prompt(memory_dir: str | None = None) -> str | None:
     injected per-turn as a <memory-context> user message by agent_loop.py,
     keeping the system prompt stable and maximising prompt cache hits.
     """
-    if not config.MEMORY_ENABLED:
+    if not config.get().memory_enabled:
         return None
 
     mem_dir = memory_dir or get_memory_dir()
@@ -53,7 +53,7 @@ def build_memory_user_message() -> str | None:
     there is no index content.  The caller (_inject_memory_context
     in agent_loop.py) wraps this in <memory-index> tags.
     """
-    if not config.MEMORY_ENABLED:
+    if not config.get().memory_enabled:
         return None
 
     return _load_entrypoint()

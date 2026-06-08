@@ -1,7 +1,5 @@
 """Select relevant memories via an LLM query.
 
-Corresponds to Claude Code's src/memdir/findRelevantMemories.ts.
-
 Flow:
   1. scan_memory_files() → get headers
   2. format_memory_manifest() → build text listing

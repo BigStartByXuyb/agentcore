@@ -1,8 +1,7 @@
 """Glob tool — fast file pattern matching by name.
 
-Corresponds to Claude Code's GlobTool. Uses ripgrep (rg --files --glob)
-for high-performance file search, with pathlib fallback if rg is not
-available.
+Uses ripgrep (rg --files --glob) for high-performance file search,
+with pathlib fallback if rg is not available.
 
 Unlike grep (searches file content), glob only matches file paths —
 it never opens files, so it's very fast even on large codebases.

@@ -22,9 +22,9 @@ from src.memory.paths import get_memory_dir
 def build_system_prompt() -> str:
     """Build the static system prompt.
 
-    Mirrors Claude Code's systemPrompt.ts — the base prompt is constant
-    across turns so the API can cache it.  Skill/agent listings are NOT
-    included here; they are injected as <system-reminder> user messages.
+    The base prompt is constant across turns so the API can cache it.
+    Skill/agent listings are NOT included here; they are injected as
+    <system-reminder> user messages.
     """
     sections = [
         _build_identity(),

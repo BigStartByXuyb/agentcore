@@ -2,8 +2,6 @@
 
 Extracted from src/skills/__init__.py so that both skill and agent
 modules can import without cross-dependency.
-
-Mirrors Claude Code's parseFrontmatter() in frontmatterParser.ts.
 """
 
 from __future__ import annotations

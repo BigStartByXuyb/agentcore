@@ -27,6 +27,38 @@ from src.session import SessionStorage
 from src.commands import CommandContext, handle_clear, handle_resume, handle_sessions, handle_plan, handle_settings
 
 
+_HELP_TEXT = """\
+My Agent — 基于 Python 的 Agent 系统
+
+启动参数:
+  python -m src.main                  正常启动
+  python -m src.main --resume [id]    恢复指定会话（省略 id 恢复上次）
+  python -m src.main -h / --help      显示此帮助
+
+交互式命令:
+  /help                 显示命令帮助
+  /clear                清空当前上下文，开始新对话
+  /sessions             查看历史会话列表
+  /resume [id]          恢复历史会话（省略 id 恢复上次）
+  /plan [描述]          进入计划模式（限制为只读工具）
+  /settings             查看当前生效配置
+  /settings init        创建项目级 settings.json
+  /settings reset       重置全局 settings 为默认值
+  /settings path        显示配置文件路径
+  exit / quit           退出程序
+
+配置文件:
+  全局:   ~/.my-agent/settings.json         所有项目共享
+  项目:   <项目目录>/.my-agent/settings.json  当前项目专属（优先级更高）
+
+环境变量（仅 API 凭证）:
+  ANTHROPIC_AUTH_TOKEN   Anthropic API 密钥
+  ANTHROPIC_BASE_URL     Anthropic API 代理地址（可选）
+  DEEPSEEK_API_KEY       DeepSeek API 密钥
+  DEEPSEEK_BASE_URL      DeepSeek API 代理地址（可选）
+"""
+
+
 def _parse_resume_arg() -> str | None:
     """Parse --resume [session_id] from sys.argv."""
     if "--resume" not in sys.argv:
@@ -38,11 +70,16 @@ def _parse_resume_arg() -> str | None:
 
 
 async def async_main() -> None:
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(_HELP_TEXT)
+        return
+
     from src.sandbox import sandbox_manager
     from src.memory.paths import ensure_memory_dir
-    from src.core.settings import ensure_default_settings, validate_config
+    from src.core.settings import ensure_default_settings, create_project_settings, validate_config
 
     ensure_default_settings()
+    create_project_settings()
     ensure_memory_dir()
 
     errors = validate_config()
@@ -95,6 +132,10 @@ async def async_main() -> None:
                 break
 
             # --- Slash commands ---
+            if stripped == "/help":
+                print(_HELP_TEXT)
+                continue
+
             if stripped == "/clear":
                 ctx = await handle_clear(ctx)
                 continue

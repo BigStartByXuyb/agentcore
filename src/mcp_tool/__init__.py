@@ -6,7 +6,7 @@ ToolDef entries, and registers them into ALL_TOOLS.
 Architecture (after async refactor):
   - Single event loop: all MCP lifecycle tasks + tool calls run on the main asyncio loop
   - Memoize cache: _connection_cache stores asyncio.Task per server name,
-    ensuring only one connection is created per server (like Claude Code's memoize pattern)
+    ensuring only one connection is created per server (memoize pattern)
   - Async executors: MCP tool executors are async, enabling true concurrent tool calls
 """
 

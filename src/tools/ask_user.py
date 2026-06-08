@@ -1,6 +1,6 @@
 """AskUserQuestion tool — lets the LLM ask the user structured questions.
 
-Corresponds to Claude Code's AskUserQuestionTool. The LLM passes
+The LLM passes
 questions with options as tool input; the executor emits a
 UserQuestionRequest event whose Future is resolved by the display
 handler with the user's answers.

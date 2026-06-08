@@ -58,8 +58,7 @@ class ProviderMessage:
       - .stop_reason: "end_turn" | "tool_use" | "max_tokens"
       - .usage: object with .input_tokens, .output_tokens, etc.
 
-    When is_error is True, this is a synthetic error message (like Claude Code's
-    AssistantMessage with isApiErrorMessage=true). The content contains the
+    When is_error is True, this is a synthetic error message. The content contains the
     human-readable error text, and the error field holds the original exception
     for recovery logic (prompt_too_long detection, thinking-400 retry, etc.).
     """

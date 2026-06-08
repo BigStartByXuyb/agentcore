@@ -1,9 +1,5 @@
 """Error classification and synthetic message generation.
 
-Corresponds to Claude Code's:
-  - src/errors.ts:425 — getAssistantMessageFromError()
-  - src/query.ts:955  — outer try/catch converting errors to assistant messages
-
 Two core responsibilities:
   1. classify_api_error()  — map SDK exceptions to AgentErrorCode
   2. create_assistant_error_message() — build a synthetic assistant message
@@ -238,8 +234,6 @@ def create_assistant_error_message(error: Exception) -> dict:
     Returns a dict ready to be appended to the message history, keeping
     user/assistant alternation intact even when query_model() fails.
 
-    Format mirrors Claude Code's getAssistantMessageFromError():
-      {"role": "assistant", "content": [{"type": "text", "text": "..."}]}
     """
     code = classify_api_error(error)
     base_msg = _ERROR_MESSAGES.get(code, _ERROR_MESSAGES[AgentErrorCode.API_UNKNOWN])

@@ -1,8 +1,7 @@
 """Plan agent — software architect for designing implementation plans.
 
-Corresponds to Claude Code's Plan agent type. Restricted to read-only
-tools. Focuses on identifying critical files, analyzing trade-offs,
-and producing step-by-step implementation strategies.
+Restricted to read-only tools. Focuses on identifying critical files,
+analyzing trade-offs, and producing step-by-step implementation strategies.
 """
 
 from src.agents import AgentDefinition

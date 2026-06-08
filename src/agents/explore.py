@@ -1,7 +1,5 @@
 """Explore agent — fast read-only codebase search specialist.
 
-Corresponds to Claude Code's src/tools/AgentTool/built-in/exploreAgent.ts.
-
 Restricted to read-only tools (bash, read_file, grep).  Cannot spawn
 sub-agents or invoke skills.
 """

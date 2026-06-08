@@ -151,28 +151,38 @@ async def handle_settings(ctx: CommandContext, arg: str = "") -> CommandContext:
     sub = arg.strip().lower()
 
     if not sub:
-        # Show current effective config
+        # Show current effective config with descriptions
+        from src.core.settings import _SETTINGS_DESCRIPTIONS
         cfg = config.get()
         user_path, project_path = get_settings_paths()
         import os
-        print("Current settings (merged):")
-        print(f"  provider:              {cfg.provider}")
-        print(f"  model:                 {cfg.model}")
-        print(f"  max_tokens:            {cfg.max_tokens}")
-        print(f"  max_context_window:    {cfg.max_context_window}")
-        print(f"  max_turns:             {cfg.max_turns}")
-        print(f"  max_agent_depth:       {cfg.max_agent_depth}")
-        print(f"  thinking_enabled:      {cfg.thinking_enabled}")
-        print(f"  thinking_budget_tokens:{cfg.thinking_budget_tokens}")
-        print(f"  memory_enabled:        {cfg.memory_enabled}")
-        print(f"  memory_max_files:      {cfg.memory_max_files}")
-        print(f"  memory_max_relevant:   {cfg.memory_max_relevant}")
-        print(f"  session_persist:       {cfg.session_persist_enabled}")
-        print(f"  micro_compact_enabled: {cfg.micro_compact_enabled}")
-        print(f"  micro_compact_keep:    {cfg.micro_compact_keep_recent}")
-        print(f"  auto_compact_tokens:   {cfg.auto_compact_max_tokens}")
-        print(f"  sandbox_enabled:       {cfg.sandbox_enabled}")
-        print(f"\n  User:    {user_path} {'✓' if os.path.isfile(user_path) else '(not found)'}")
+
+        settings_map = [
+            ("provider",                cfg.provider),
+            ("model",                   cfg.model),
+            ("max_tokens",              cfg.max_tokens),
+            ("max_context_window",      cfg.max_context_window),
+            ("max_turns",               cfg.max_turns),
+            ("max_agent_depth",         cfg.max_agent_depth),
+            ("thinking_enabled",        cfg.thinking_enabled),
+            ("thinking_budget_tokens",  cfg.thinking_budget_tokens),
+            ("memory_enabled",          cfg.memory_enabled),
+            ("memory_max_files",        cfg.memory_max_files),
+            ("memory_max_relevant",     cfg.memory_max_relevant),
+            ("session_persist_enabled", cfg.session_persist_enabled),
+            ("micro_compact_enabled",   cfg.micro_compact_enabled),
+            ("micro_compact_keep_recent", cfg.micro_compact_keep_recent),
+            ("auto_compact_max_tokens", cfg.auto_compact_max_tokens),
+            ("sandbox_enabled",         cfg.sandbox_enabled),
+        ]
+
+        print("Current settings (merged):\n")
+        for key, value in settings_map:
+            desc = _SETTINGS_DESCRIPTIONS.get(key, "")
+            print(f"  {key:<28} {str(value):<12} # {desc}")
+
+        print(f"\nConfig files:")
+        print(f"  User:    {user_path} {'✓' if os.path.isfile(user_path) else '(not found)'}")
         print(f"  Project: {project_path} {'✓' if os.path.isfile(project_path) else '(not created)'}")
 
     elif sub == "init":

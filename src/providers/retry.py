@@ -3,8 +3,6 @@
 Provider-agnostic: does NOT import anthropic, openai, or any SDK.
 Each adapter supplies its own error-classification callbacks.
 
-Corresponds to Claude Code's src/services/api/withRetry.ts.
-
 with_retry is an async generator:
   - yields RetryEvent during retry delays (real-time notification)
   - yields T (the result) as the final item on success

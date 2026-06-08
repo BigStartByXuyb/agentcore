@@ -1,7 +1,5 @@
 """File encoding detection and line-ending handling.
 
-Mirrors Claude Code's fileRead.ts encoding detection and file.ts CRLF handling.
-
 Encoding detection: read the first few bytes for BOM markers.
 Line-ending detection: sample first 4KB to count CRLF vs LF.
 Read/write contract:

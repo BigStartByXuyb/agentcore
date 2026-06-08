@@ -47,6 +47,9 @@ class SettingsSchema(BaseModel, extra="ignore"):
     micro_compact_keep_recent: Optional[int] = None
     auto_compact_max_tokens: Optional[int] = None
 
+    deepseek_reasoner_model: Optional[str] = None
+    disable_streaming_fallback: Optional[bool] = None
+
     sandbox_enabled: Optional[bool] = None
     sandbox_allow_write: Optional[list[str]] = None
     sandbox_deny_write: Optional[list[str]] = None
@@ -142,6 +145,34 @@ def load_settings() -> SettingsSchema:
 # Defaults bootstrap
 # ---------------------------------------------------------------------------
 
+_SETTINGS_DESCRIPTIONS: dict[str, str] = {
+    "provider":                 "模型提供商 (anthropic / deepseek)",
+    "model":                    "主模型名称",
+    "compact_model":            "上下文压缩用模型 (null=跟随主模型)",
+    "side_query_model":         "记忆召回等轻量查询用模型 (null=用默认)",
+    "fallback_model":           "主模型失败时的降级模型 (null=用默认)",
+    "max_tokens":               "单次 LLM 回复的最大 token 数",
+    "max_context_window":       "上下文窗口大小 (token)，超过触发压缩",
+    "max_turns":                "单次对话最大轮次 (防止无限循环)",
+    "max_agent_depth":          "子 Agent 最大嵌套深度",
+    "thinking_enabled":         "Extended Thinking 开关",
+    "thinking_budget_tokens":   "Thinking 预算 token 数 (必须 < max_tokens)",
+    "memory_enabled":           "跨会话记忆系统开关",
+    "memory_max_files":         "记忆目录最大文件扫描数",
+    "memory_max_relevant":      "每轮召回的最大相关记忆数",
+    "session_persist_enabled":  "会话持久化开关 (保存到本地 JSON)",
+    "micro_compact_enabled":    "微压缩开关 (无损清理旧 tool_result)",
+    "micro_compact_keep_recent":"微压缩保留最近 N 轮完整内容",
+    "auto_compact_max_tokens":  "自动压缩摘要的最大 token 数",
+    "deepseek_reasoner_model":  "DeepSeek 推理模型名称",
+    "disable_streaming_fallback": "禁用流式降级 (true 时流式失败不自动回退)",
+    "sandbox_enabled":          "沙箱隔离开关 (仅 Linux/WSL2 生效)",
+    "sandbox_allow_write":      "沙箱额外允许写入的路径列表",
+    "sandbox_deny_write":       "沙箱禁止写入的路径列表",
+    "sandbox_deny_read":        "沙箱禁止读取的路径列表",
+    "sandbox_excluded_commands": "不经过沙箱的命令列表",
+}
+
 _DEFAULT_SETTINGS: dict = {
     "provider": "anthropic",
     "model": "claude-sonnet-4-6",
@@ -161,6 +192,8 @@ _DEFAULT_SETTINGS: dict = {
     "micro_compact_enabled": True,
     "micro_compact_keep_recent": 6,
     "auto_compact_max_tokens": 4096,
+    "deepseek_reasoner_model": "deepseek-reasoner",
+    "disable_streaming_fallback": False,
     "sandbox_enabled": True,
     "sandbox_allow_write": [],
     "sandbox_deny_write": [],
@@ -225,12 +258,20 @@ def validate_config() -> list[str]:
 # Defaults bootstrap
 # ---------------------------------------------------------------------------
 
-def _write_defaults(path: str) -> None:
-    """Write _DEFAULT_SETTINGS to a JSON file (filtering out None values)."""
+def _write_settings(path: str, values: dict | None = None) -> None:
+    """Write settings to a JSON file with inline _comments block.
+
+    If values is None, uses _DEFAULT_SETTINGS.
+    The _comments key is ignored by pydantic (extra="ignore") on read-back.
+    """
+    source = values if values is not None else _DEFAULT_SETTINGS
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    filtered = {k: v for k, v in _DEFAULT_SETTINGS.items() if v is not None}
+    output: dict = {"_comments": _SETTINGS_DESCRIPTIONS}
+    for k, v in source.items():
+        if v is not None:
+            output[k] = v
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(filtered, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
 
@@ -242,23 +283,34 @@ def ensure_default_settings() -> None:
     user_path, _ = get_settings_paths()
     if os.path.isfile(user_path):
         return
-    _write_defaults(user_path)
+    _write_settings(user_path)
 
 
 def reset_user_settings() -> str:
     """Overwrite user-level settings with defaults. Returns the file path."""
     user_path, _ = get_settings_paths()
-    _write_defaults(user_path)
+    _write_settings(user_path)
     return user_path
 
 
 def create_project_settings() -> str:
-    """Create project-level settings with defaults. Returns the file path.
+    """Create project-level settings inheriting current effective config.
+
+    Reads the merged config (code defaults + user settings) and writes it
+    to the project-level file, so the user starts with the full effective
+    config and only needs to change what differs for this project.
 
     If the file already exists, does nothing and returns the path.
     """
     _, project_path = get_settings_paths()
     if os.path.isfile(project_path):
         return project_path
-    _write_defaults(project_path)
+
+    merged = load_settings()
+    effective: dict = {}
+    for key, default_val in _DEFAULT_SETTINGS.items():
+        merged_val = getattr(merged, key, None)
+        effective[key] = merged_val if merged_val is not None else default_val
+
+    _write_settings(project_path, effective)
     return project_path

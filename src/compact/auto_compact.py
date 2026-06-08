@@ -11,7 +11,6 @@ Trigger order per API call:
 Includes truncate-head retry for when the compaction LLM call itself
 exceeds the context window (prompt_too_long on the compact LLM call).
 
-Corresponds to Claude Code's src/services/compact/compactHistory.ts.
 """
 
 from __future__ import annotations

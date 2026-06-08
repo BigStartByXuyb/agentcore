@@ -1,7 +1,5 @@
 """Agent tool — launches a sub-agent to handle complex tasks.
 
-Corresponds to Claude Code's src/tools/AgentTool/AgentTool.tsx.
-
 This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 {"prompt": "...", "description": "..."} and it:
 

@@ -1,7 +1,5 @@
 """Skill tool — invokes a skill by name within the main conversation.
 
-Corresponds to Claude Code's src/tools/SkillTool/SkillTool.ts.
-
 This is a single ToolDef registered in ALL_TOOLS.  The LLM calls it with
 {"skill": "my-skill"} and it:
 

@@ -1,7 +1,5 @@
 """Verification agent — validates implementation correctness after task completion.
 
-Corresponds to Claude Code's src/tools/AgentTool/built-in/verificationAgent.ts.
-
 Read-only agent that runs builds, tests, linters, and checks to produce
 a PASS/FAIL/PARTIAL verdict with evidence.
 """

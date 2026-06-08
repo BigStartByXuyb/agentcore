@@ -28,7 +28,7 @@ class McpClientBase(ABC):
     """MCP 客户端基类 — 全 async，单事件循环，子类只需实现 _async_lifecycle。
 
     客户端只负责连接和调用，不做重连。重连由外层 connect_to_server()
-    memoize 缓存 + executor 重试处理，对应 Claude Code 的架构。
+    memoize 缓存 + executor 重试处理。
     """
 
     def __init__(self, cfg: McpServerConfig):
@@ -95,7 +95,7 @@ class McpClientBase(ABC):
     def _on_lifecycle_exit(self, fut: asyncio.Task) -> None:
         """lifecycle task 退出时被调用（sync done callback）。
 
-        对应 Claude Code 的 client.onclose → 清 memoize 缓存。
+        lifecycle 退出时清 memoize 缓存。
 
         判断预期退出：_close_event 为 None（_teardown 已完成）或已 set
         （close() 被调用，_teardown 正在等 lifecycle 退出）。

@@ -1,10 +1,5 @@
 """Permission engine — rule-based tool access control.
 
-Corresponds to Claude Code's permission system:
-  - permissionRuleParser.ts  → parse_rule() / match_content()
-  - permissions.ts           → PermissionEngine.check()
-  - useCanUseTool.tsx        → PermissionRequest event (async Future)
-
 Three rule sources with descending priority:
   session  — runtime, memory-only, lost on restart
   project  — agent-permissions.json in project root
@@ -91,7 +86,6 @@ def match_content(pattern: str | None, content: str | None) -> bool:
 
 # ---------------------------------------------------------------------------
 # Internal editable paths — auto-allowed without user confirmation
-# Mirrors Claude Code's checkEditableInternalPath() in filesystem.ts
 # ---------------------------------------------------------------------------
 
 _MY_AGENT_DIR = os.path.normpath(os.path.join(os.path.expanduser("~"), ".my-agent"))

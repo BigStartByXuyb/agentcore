@@ -1,7 +1,7 @@
 """Plan Mode — state management and helpers.
 
-Corresponds to Claude Code's plan mode: restricts tools to read-only + plan
-file writing, injects plan mode attachment, and provides post-compact recovery.
+Restricts tools to read-only + plan file writing, injects plan mode
+attachment, and provides post-compact recovery.
 """
 
 from __future__ import annotations

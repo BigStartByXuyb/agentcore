@@ -8,10 +8,6 @@ Provides two entry points:
                       runs the LLM <-> tool cycle, emits AgentEvent via
                       on_event callback, returns final text.
 
-Corresponds to Claude Code's:
-  - src/query.ts            -> queryLoop()
-  - src/services/tools/     -> tool execution within the loop
-  - src/utils/forkedAgent.ts -> sub-agent loop reuse
 """
 
 from __future__ import annotations

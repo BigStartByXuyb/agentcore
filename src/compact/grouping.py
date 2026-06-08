@@ -5,10 +5,6 @@ Provides:
   - truncate_head()                 — drop oldest groups for prompt-too-long retry
   - ensure_tool_result_pairing()    — defensive repair for orphaned tool_use/tool_result
 
-Corresponds to Claude Code's:
-  - src/services/compact/grouping.ts  → groupMessagesByApiRound
-  - src/services/compact/compact.ts   → truncateHeadForPTLRetry
-  - src/utils/messages.ts             → ensureToolResultPairing
 """
 
 from __future__ import annotations

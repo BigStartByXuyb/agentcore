@@ -34,7 +34,7 @@ SCHEMA: dict = {
 
 
 def check_permissions(inputs: dict, context: ToolUseContext) -> ToolPermissionResult:
-    """Always ask user for plan approval — mirrors Claude Code's ExitPlanMode permission."""
+    """Always ask user for plan approval."""
     from src.core.types import PlanPhase
 
     state = context.agent_state

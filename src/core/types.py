@@ -28,10 +28,7 @@ MemoryType = Literal["user", "feedback", "project", "reference"]
 
 @dataclass
 class MemoryHeader:
-    """Parsed header of a single memory file (frontmatter metadata + path).
-
-    Corresponds to Claude Code's MemoryHeader in memoryScan.ts.
-    """
+    """Parsed header of a single memory file (frontmatter metadata + path)."""
 
     filename: str                   # relative to memory dir (e.g. "user_role.md")
     file_path: str                  # absolute path
@@ -217,7 +214,6 @@ class MessageHistory:
     prepare_messages() expands attachments and merges consecutive same-role
     messages, returning list[Message] for provider adapters to convert.
 
-    Corresponds to Claude Code's internal Message[] + normalizeMessagesForAPI().
     """
 
     def __init__(self, messages: list[Message] | None = None) -> None:
@@ -487,7 +483,7 @@ class ToolDef:
     """Tool definition — each tool constructs one instance and exports it.
 
     Required: schema, executor, map_result.
-    Optional fields have safe defaults matching Claude Code's buildTool():
+    Optional fields have safe defaults:
       - is_enabled:           default True
       - is_read_only:         default False  (fail-closed)
       - is_destructive:       default False

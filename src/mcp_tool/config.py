@@ -1,8 +1,7 @@
 """MCP server configuration loading.
 
 Reads MCP server definitions from JSON config files and returns
-structured ServerConfig objects. Mirrors Claude Code's
-src/services/mcp/config.ts config loading logic.
+structured ServerConfig objects.
 
 Config file format (.mcp.json):
 {

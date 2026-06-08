@@ -44,9 +44,6 @@ def _check_and_write_sync(
     """Critical section: stale check + detect encoding + write. Runs in one thread.
 
     No async yield between check and write — prevents TOCTOU race.
-    Mirrors Claude Code's approach (FileWriteTool.ts:267 comment:
-    "Please avoid async operations between here and writing to disk
-    to preserve atomicity.")
     """
     from src.utils.file_encoding import write_text_content
 

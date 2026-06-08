@@ -1,9 +1,5 @@
 """Agent definitions — built-in + file-based discovery.
 
-Corresponds to Claude Code's:
-  - src/tools/AgentTool/built-in/     → built-in agents (Explore, Plan, etc.)
-  - src/tools/AgentTool/loadAgentsDir.ts → custom agent loading from .md files
-
 Design overview:
   - Built-in agents are registered at import time (Explore, etc.)
   - Custom agents are discovered from agents/ directories (AGENT.md files)
@@ -50,8 +46,7 @@ class AgentDefinition:
         allowed_tools:    Whitelist — None means all tools (agent excluded)
         disallowed_tools: Blacklist — applied after allowed_tools
         skills:           Skill instance whitelist — None means all skills
-                          (mirrors Claude Code's per-agent precise mode:
-                          if set, only these skill names are injected in
+                          (if set, only these skill names are injected in
                           the <system-reminder> listing; if None, the full
                           skill listing is injected)
     """

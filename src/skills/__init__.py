@@ -1,10 +1,5 @@
 """Skill discovery, loading and content building.
 
-Corresponds to Claude Code's:
-  - src/skills/loadSkillsDir.ts   → loadSkillsFromSkillsDir(), parseFrontmatter
-  - src/tools/SkillTool/prompt.ts → formatCommandsWithinBudget(), skill listing
-  - src/tools/SkillTool/SkillTool.ts → inline execution (call() path)
-
 Design overview:
   - discover_skills()   → scan skills/ dirs, parse each SKILL.md frontmatter
   - build_skill_content() → strip frontmatter, replace ${SKILL_DIR}, prepend base dir header
@@ -33,9 +28,6 @@ from src.core.types import Attachment
 @dataclass
 class SkillInfo:
     """Parsed skill metadata + content from a SKILL.md file.
-
-    Corresponds to Claude Code's PromptCommand object built by
-    createSkillCommand() in loadSkillsDir.ts.
 
     Fields:
       name:         directory name (= skill name). E.g. "project-analyzer"
@@ -69,7 +61,6 @@ class SkillInfo:
 def build_skill_content(skill: SkillInfo) -> str:
     """Build the final skill content that gets injected into conversation.
 
-    Mirrors Claude Code's getPromptForCommand() in loadSkillsDir.ts:
       1. Prepend "Base directory for this skill: <path>" header
       2. Replace ${SKILL_DIR} with the skill's directory path
       3. Replace ${CLAUDE_SKILL_DIR} with the same (alias)
@@ -245,7 +236,7 @@ def format_skill_listing(
                        (fork skills would create nested agent loops).
         filter_names:  If not None, only include skills whose name is in
                        this list.  Implements per-agent skill precise mode
-                       (mirrors Claude Code's agent-level skills whitelist).
+                       (per-agent skill whitelist).
     """
     if not skills:
         return ""
@@ -275,7 +266,6 @@ def format_skill_listing(
 # ---------------------------------------------------------------------------
 
 # Tracks which skills have already been announced to the LLM in this session.
-# Mirrors Claude Code's sentSkillNames per-agent tracking in attachments.ts.
 _sent_skill_names: set[str] = set()
 
 

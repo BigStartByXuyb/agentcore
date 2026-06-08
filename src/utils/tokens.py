@@ -1,7 +1,4 @@
-"""Token estimation utilities.
-
-Corresponds to Claude Code's src/utils/tokens.ts.
-"""
+"""Token estimation utilities."""
 
 from __future__ import annotations
 
@@ -16,7 +13,7 @@ def estimate_token_count(history: MessageHistory, state: AgentState | None = Non
     and only estimates tokens for messages added since. Otherwise falls back to
     full local estimation.
 
-    Claude Code uses: input_tokens + output_tokens + cache_tokens as base,
+    Uses input_tokens + output_tokens + cache_tokens as base,
     then estimates new messages at ~chars/4.
     """
     if state and state.last_usage_tokens > 0 and state.messages_since_last_usage > 0:

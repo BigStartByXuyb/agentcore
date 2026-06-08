@@ -20,6 +20,7 @@ High-level usage (manages reminders, memory, permissions)::
 Low-level usage (caller owns ToolUseContext, no auto-reminders/memory)::
 
     from src import init, run_agent_loop, ToolUseContext, MessageHistory, make_headless_handler
+    from src.permissions import get_permission_engine
 
     async def main():
         await init()
@@ -30,6 +31,7 @@ Low-level usage (caller owns ToolUseContext, no auto-reminders/memory)::
             tools=["bash", "read_file"],
             system_prompt="You are a helpful assistant.",
             label="custom",
+            permissions=get_permission_engine(),
         )
         result = await run_agent_loop(
             tool_use_context=ctx,
@@ -53,7 +55,15 @@ from src.core.events import (
     ToolEnd,
     TokenUsage,
     ErrorEvent,
+    Recovery,
     RetryNotice,
+    SubAgentStart,
+    SubAgentEnd,
+    PermissionRequest,
+    PermissionDenied,
+    UserQuestionRequest,
+    CompactCircuitBreaker,
+    BlockingLimitReached,
 )
 from src.display import (
     default_handler,
@@ -80,7 +90,15 @@ __all__ = [
     "ToolEnd",
     "TokenUsage",
     "ErrorEvent",
+    "Recovery",
     "RetryNotice",
+    "SubAgentStart",
+    "SubAgentEnd",
+    "PermissionRequest",
+    "PermissionDenied",
+    "UserQuestionRequest",
+    "CompactCircuitBreaker",
+    "BlockingLimitReached",
     "default_handler",
     "make_interactive_handler",
     "make_headless_handler",

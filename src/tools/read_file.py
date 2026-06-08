@@ -112,7 +112,7 @@ async def executor(inputs: dict, context: ToolUseContext) -> ToolResult:
             except OSError:
                 pass
 
-    # --- large file rejection (full read only, matches Claude Code behavior) ---
+    # --- large file rejection (full read only) ---
     is_full_read = offset is None and limit is None
     if is_full_read:
         try:

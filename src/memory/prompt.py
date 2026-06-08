@@ -1,10 +1,5 @@
 """Build memory behavioral instructions for the system prompt.
 
-Corresponds to Claude Code's src/memdir/memdir.ts:
-  - buildMemoryLines()  → _build_behavioral_instructions()
-  - buildMemoryPrompt() → build_memory_prompt()
-  - loadMemoryPrompt()  → build_memory_prompt() (combined)
-
 The behavioral instructions tell the LLM:
   - What memory types exist and when to save each
   - The frontmatter file format

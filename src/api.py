@@ -5,9 +5,6 @@ Public surface (async):
   - query_model(...)         → non-streaming convenience wrapper (side queries)
   - get_client() / reset_client() → AsyncAnthropic client singleton access
 
-Corresponds to Claude Code's src/services/api/claude.ts:
-  query_model_stream  ≈ queryModelWithStreaming
-  query_model         ≈ queryModelWithoutStreaming
 """
 
 from __future__ import annotations

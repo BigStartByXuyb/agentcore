@@ -1,9 +1,4 @@
-"""Scan memory files and build manifests for recall/extraction prompts.
-
-Corresponds to Claude Code's src/memdir/memoryScan.ts:
-  - scanMemoryFiles()      → scan_memory_files()
-  - formatMemoryManifest() → format_memory_manifest()
-"""
+"""Scan memory files and build manifests for recall/extraction prompts."""
 
 from __future__ import annotations
 
@@ -18,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Only scan these extensions
 _MEMORY_EXTENSIONS = {".md", ".txt", ".text"}
 
-# Limits — match Claude Code's memoryScan.ts
+# Limits
 _MAX_FRONTMATTER_LINES = 30
 _MAX_FILES = 200
 

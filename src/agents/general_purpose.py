@@ -1,7 +1,5 @@
 """General-purpose agent — full tool access, catch-all for multi-step tasks.
 
-Corresponds to Claude Code's src/tools/AgentTool/built-in/generalPurposeAgent.ts.
-
 No tool restrictions. Used when the task requires both reading and writing,
 or doesn't fit a more specialized agent type.
 """

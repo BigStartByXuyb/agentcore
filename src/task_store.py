@@ -1,7 +1,6 @@
 """In-memory task store — LLM self-managed todo list.
 
 V1: single agent, memory-only. Tasks are lost on process exit.
-Corresponds to Claude Code's TaskStore (simplified).
 
 All agents in the same session share one TaskStore instance,
 accessed via get_task_store().

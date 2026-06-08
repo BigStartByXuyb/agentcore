@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from src.core.types import ToolResult, ToolDef, ToolUseContext
 from src.utils.file_state_cache import FileState
 
-# --- quote normalization (matches Claude Code FileEditTool/utils.ts) ---
+# --- quote normalization ---
 
 _CURLY_QUOTE_MAP = str.maketrans({
     '‘': "'",   # left single curly  → straight

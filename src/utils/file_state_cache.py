@@ -3,8 +3,6 @@
 Provides deduplication for repeated reads and detects external
 modifications between turns (getChangedFiles).
 
-Corresponds to Claude Code's utils/fileStateCache.ts +
-the getChangedFiles() portion of utils/attachments.ts.
 """
 
 from __future__ import annotations
@@ -102,7 +100,7 @@ class FileStateCache:
           3. Update the cache entry (so the change is reported only once)
           4. Build an Attachment with the diff snippet
 
-        Corresponds to Claude Code's getChangedFiles() in attachments.ts.
+        Detects files that changed since they were last cached.
         """
         if not self._cache:
             return []

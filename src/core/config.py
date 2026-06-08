@@ -108,17 +108,13 @@ class Config:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _val(settings_val: Any, default: Any, env_key: str | None = None, cast: Any = None) -> Any:
-    """Resolve value: env var > settings.json > code default."""
-    if env_key:
-        env = os.environ.get(env_key)
-        if env is not None:
-            return cast(env) if cast else env
+def _val(settings_val: Any, default: Any) -> Any:
+    """Resolve value: settings.json > code default."""
     return settings_val if settings_val is not None else default
 
 
 def _build_models(provider: str, settings: Any) -> ProviderModels:
-    """Build ProviderModels from provider defaults → settings → env vars."""
+    """Build ProviderModels from provider defaults → settings.json."""
     try:
         from src.providers import get_provider
         adapter = get_provider(provider)
@@ -132,26 +128,10 @@ def _build_models(provider: str, settings: Any) -> ProviderModels:
             fallback: str = "claude-sonnet-4-6"
         defaults = _Defaults()
 
-    s_main = settings.model
-    env_main = os.environ.get("AGENT_MODEL")
-    main = env_main or s_main or defaults.main
-
-    s_compact = settings.compact_model
-    compact = (
-        os.environ.get("AGENT_COMPACT_MODEL")
-        or s_compact
-        or (main if (env_main or s_main) else defaults.compact)
-    )
-    side_query = (
-        os.environ.get("AGENT_SIDE_QUERY_MODEL")
-        or settings.side_query_model
-        or defaults.side_query
-    )
-    fallback = (
-        os.environ.get("AGENT_FALLBACK_MODEL")
-        or settings.fallback_model
-        or defaults.fallback
-    )
+    main = settings.model or defaults.main
+    compact = settings.compact_model or (main if settings.model else defaults.compact)
+    side_query = settings.side_query_model or defaults.side_query
+    fallback = settings.fallback_model or defaults.fallback
 
     return ProviderModels(
         provider=provider, main=main, compact=compact,
@@ -160,11 +140,15 @@ def _build_models(provider: str, settings: Any) -> ProviderModels:
 
 
 def _build_config() -> Config:
-    """Read settings files + env vars, return a fully resolved Config."""
+    """Read settings files, return a fully resolved Config.
+
+    Only API credentials come from environment variables.
+    All other settings come from settings.json (project > user > defaults).
+    """
     from src.core.settings import load_settings
     s = load_settings()
 
-    provider = _val(s.provider, "anthropic", "AGENT_PROVIDER")
+    provider = _val(s.provider, "anthropic")
 
     try:
         models = _build_models(provider, s)
@@ -175,14 +159,6 @@ def _build_config() -> Config:
             side_query="claude-haiku-3-5", fallback="claude-sonnet-4-6",
         )
 
-    persist_env = os.environ.get("AGENT_SESSION_PERSIST")
-    if persist_env is not None:
-        session_persist = persist_env != "0"
-    elif s.session_persist_enabled is not None:
-        session_persist = s.session_persist_enabled
-    else:
-        session_persist = True
-
     return Config(
         provider=provider,
         models=models,
@@ -192,7 +168,7 @@ def _build_config() -> Config:
         anthropic_base_url=os.environ.get("ANTHROPIC_BASE_URL", None),
         deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
         deepseek_base_url=os.environ.get("DEEPSEEK_BASE_URL", None),
-        deepseek_reasoner_model=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
+        deepseek_reasoner_model=_val(s.deepseek_reasoner_model, "deepseek-reasoner"),
 
         max_tokens=_val(s.max_tokens, 16384),
         max_context_window=_val(s.max_context_window, 200_000),
@@ -206,7 +182,7 @@ def _build_config() -> Config:
         memory_max_files=_val(s.memory_max_files, 200),
         memory_max_relevant=_val(s.memory_max_relevant, 5),
 
-        session_persist_enabled=session_persist,
+        session_persist_enabled=_val(s.session_persist_enabled, True),
 
         micro_compact_enabled=_val(s.micro_compact_enabled, True),
         micro_compact_keep_recent=_val(s.micro_compact_keep_recent, 6),
@@ -216,9 +192,7 @@ def _build_config() -> Config:
         prompt_cache_ttl_minutes=5,
         bytes_per_token=2,
 
-        disable_streaming_fallback=os.environ.get(
-            "DISABLE_STREAMING_FALLBACK", ""
-        ).lower() in ("1", "true"),
+        disable_streaming_fallback=_val(s.disable_streaming_fallback, False),
 
         sandbox_enabled=_val(s.sandbox_enabled, True),
         sandbox_allow_write=s.sandbox_allow_write if s.sandbox_allow_write is not None else [],

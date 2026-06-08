@@ -7,7 +7,6 @@ Keeps the most recent N rounds intact, clears the rest.
 When prompt cache is enabled, only clears when cache has expired
 (modifying old messages while cache is warm would invalidate it).
 
-Corresponds to Claude Code's src/services/compact/microCompact.ts.
 """
 
 from __future__ import annotations

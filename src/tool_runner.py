@@ -1,8 +1,7 @@
 """Unified tool execution entry point (async, callback-based).
 
-Corresponds to Claude Code's toolExecution.ts runToolUse() — the single
-place where executor() and map_result() are called, wrapped in try/catch
-so tool failures never crash the agent loop.
+The single place where executor() and map_result() are called, wrapped in
+try/catch so tool failures never crash the agent loop.
 
 All tool executors are now `async def executor(inputs, ctx) -> ToolResult`.
 Tools that need to emit events use `ctx.on_event` callback.
@@ -415,7 +414,6 @@ def check_tool_permissions(
 ) -> ToolPermissionResult:
     """Resolve permission: tool.check_permissions first, PermissionEngine as passthrough fallback.
 
-    Mirrors Claude Code's checkPermissions() flow:
       1. tool.check_permissions() → allow/ask/deny → use directly
       2. tool.check_permissions() → passthrough → PermissionEngine.check()
     """

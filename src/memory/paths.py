@@ -1,10 +1,4 @@
-"""Memory directory path resolution and existence checks.
-
-Corresponds to Claude Code's src/memdir/paths.ts:
-  - getAutoMemPath()       → get_memory_dir()
-  - getAutoMemEntrypoint() → get_memory_entrypoint()
-  - isAutoMemPath()        → is_memory_path()
-"""
+"""Memory directory path resolution and existence checks."""
 
 from __future__ import annotations
 

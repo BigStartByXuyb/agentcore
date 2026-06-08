@@ -1,7 +1,5 @@
 """Background memory extraction — runs after each turn (async, callback-based).
 
-Corresponds to Claude Code's src/services/extractMemories/extractMemories.ts.
-
 After the main agent produces a final response (end_turn), this module
 runs a forked agent that reviews the conversation and extracts durable
 memories worth saving.  The forked agent uses a restricted tool set

@@ -1,8 +1,6 @@
 """Agent event types — yielded by run_agent_loop(), consumed by display handlers.
 
-Corresponds to Claude Code's query.ts async generator which yields Message
-objects.  We use a lighter-weight approach: typed dataclasses that carry just
-the display-relevant data, not full API messages.
+Typed dataclasses that carry just the display-relevant data, not full API messages.
 
 The generator pattern decouples the agent loop (logic) from the terminal
 (presentation).  The loop yields events; the consumer decides how to render.

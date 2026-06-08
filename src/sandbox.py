@@ -2,7 +2,7 @@
 
 Provides filesystem read/write restrictions enforced at the kernel level.
 Only supported on Linux and WSL2+. On unsupported platforms (Windows native,
-WSL1), silently degrades to no sandbox — matching Claude Code's behavior.
+WSL1), silently degrades to no sandbox.
 
 Usage:
     from src.sandbox import sandbox_manager

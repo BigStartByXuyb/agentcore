@@ -1,0 +1,22 @@
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 16384,
+  "max_context_window": 200000,
+  "max_turns": 30,
+  "max_agent_depth": 3,
+  "thinking_enabled": true,
+  "thinking_budget_tokens": 10000,
+  "memory_enabled": true,
+  "memory_max_files": 200,
+  "memory_max_relevant": 5,
+  "session_persist_enabled": true,
+  "micro_compact_enabled": true,
+  "micro_compact_keep_recent": 6,
+  "auto_compact_max_tokens": 4096,
+  "sandbox_enabled": true,
+  "sandbox_allow_write": [],
+  "sandbox_deny_write": [],
+  "sandbox_deny_read": [],
+  "sandbox_excluded_commands": []
+}

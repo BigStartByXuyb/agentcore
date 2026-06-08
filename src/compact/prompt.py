@@ -1,7 +1,4 @@
-"""Prompts for the auto-compact LLM summarization.
-
-Corresponds to Claude Code's src/services/compact/prompt.ts.
-"""
+"""Prompts for the auto-compact LLM summarization."""
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 

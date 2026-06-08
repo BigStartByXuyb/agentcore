@@ -1,10 +1,6 @@
 """Anthropic provider adapter — native Claude API backend (async).
 
-Corresponds to Claude Code's:
-  - src/services/api/client.ts    → getAnthropicClient()
-  - src/services/api/claude.ts    → queryModel()
-
-This is the native adapter — uses anthropic SDK directly with minimal
+Uses anthropic SDK directly with minimal
 format conversion (handled by converter.py). Future providers (OpenAI-compat,
 Google, ...) sit in sibling packages with their own converters.
 

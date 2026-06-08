@@ -1,4 +1,4 @@
-# My Agent
+# Agentcore
 
 基于Python 设计的Agent 系统，支持多工具调用、Skill 系统、Subagent 派发、mcp系统(包括被动接受工具列表变更信息，网络错误重连信息)，记忆持久化、上下文压缩、权限管理、skill,subagent,mcp,setting文件热重载、信息异常处理，错误恢复等核心能力。
 

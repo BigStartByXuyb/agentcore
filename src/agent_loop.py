@@ -555,11 +555,19 @@ async def agent_loop(
     state: AgentState,
     file_state_cache: Any | None = None,
     session_storage: Any | None = None,
+    *,
+    on_event: EventCallback | None = None,
 ) -> LoopResult:
     """Run the agent loop for a single user turn.
 
     `history` is the persistent conversation state shared across turns.
     The caller (main.py REPL) owns it; we mutate via its typed helpers.
+
+    on_event: optional event handler override.  When ``None`` (default)
+    the interactive terminal handler is used (``make_interactive_handler``).
+    Programmatic callers can pass ``make_headless_handler()`` or
+    ``make_allow_all_handler()`` from ``src.display`` to bypass interactive
+    prompts.
     """
     user_msg = history.add_user(user_input)
 
@@ -629,7 +637,7 @@ async def agent_loop(
 
     turn_start_index = len(history)
 
-    handler = make_interactive_handler(default_handler)
+    handler = on_event if on_event is not None else make_interactive_handler(default_handler)
     result = await run_agent_loop(
         memory_task=memory_task,
         tool_use_context=tool_use_context,
@@ -656,6 +664,48 @@ async def agent_loop(
     asyncio.create_task(_run_extraction())
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# One-shot initialisation for programmatic (non-REPL) callers
+# ---------------------------------------------------------------------------
+
+_initialized = False
+
+
+async def init(
+    *,
+    register_mcp: bool = True,
+    start_watchers_flag: bool = False,
+) -> None:
+    """One-shot initialisation — call once before the first ``agent_loop()`` call.
+
+    Idempotent: repeated calls are no-ops.
+    ``main.py`` has its own startup sequence and does NOT need this.
+    """
+    global _initialized
+    if _initialized:
+        return
+
+    from src.core.settings import ensure_default_settings, validate_config
+    from src.memory.paths import ensure_memory_dir
+
+    ensure_default_settings()
+    ensure_memory_dir()
+
+    errors = validate_config()
+    if errors:
+        raise RuntimeError(f"Config validation failed: {'; '.join(errors)}")
+
+    if register_mcp:
+        from src.mcp_tool import register_mcp_tools
+        await register_mcp_tools(tool_registry)
+
+    if start_watchers_flag:
+        from src.watcher import start_watchers
+        start_watchers(asyncio.get_running_loop())
+
+    _initialized = True
 
 
 # ---------------------------------------------------------------------------

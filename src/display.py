@@ -195,22 +195,22 @@ def make_interactive_handler(
     *,
     interactive: bool = True,
 ) -> EventCallback:
-    """Wrap *base_handler* with permission-prompt logic.
+    """Wrap *base_handler* with permission-prompt and user-question logic.
 
-    For PermissionRequest events (interactive=True): schedule a user prompt
-    via asyncio.to_thread and resolve the Future so the tool runner resumes.
-    For all other events: delegate to *base_handler*.
-
-    Uses an asyncio.Lock to serialize all user-input prompts — prevents
-    interleaved prompts when concurrent tools both need permission.
+    While an input() prompt is active, other events are silently dropped
+    to keep the terminal clean.  The data isn't lost — tool results flow
+    to the LLM via the message system, not through display events.
     """
     input_lock = asyncio.Lock()
+    _input_active = False
 
     def _safe_set(future: asyncio.Future, value: object) -> None:
         if not future.done():
             future.set_result(value)
 
     def handler(event: AgentEvent) -> None:
+        nonlocal _input_active
+
         if isinstance(event, PermissionRequest) and event.future is not None:
             fut = event.future
             if interactive:
@@ -218,8 +218,10 @@ def make_interactive_handler(
                     prompt_text = event.custom_prompt or f"\n  Approve {event.tool_name}? [y/n]: "
 
                     async def _resolve_review() -> None:
+                        nonlocal _input_active
                         try:
                             async with input_lock:
+                                _input_active = True
                                 answer = await asyncio.to_thread(input, prompt_text)
                                 answer = answer.strip().lower()
                                 if answer in ("y", "yes"):
@@ -236,6 +238,8 @@ def make_interactive_handler(
                         except Exception as e:
                             logger.error("Permission prompt failed: %s", e)
                             _safe_set(fut, "n")
+                        finally:
+                            _input_active = False
                     asyncio.create_task(_resolve_review())
                 else:
                     preview = event.preview or _fallback_preview(event.tool_name, event.tool_input)
@@ -245,13 +249,17 @@ def make_interactive_handler(
                         prompt = f"\n  Allow {event.tool_name}?{preview}  [y/n/always]: "
 
                     async def _resolve() -> None:
+                        nonlocal _input_active
                         try:
                             async with input_lock:
+                                _input_active = True
                                 answer = await asyncio.to_thread(input, prompt)
                                 _safe_set(fut, answer.strip().lower())
                         except Exception as e:
                             logger.error("Permission prompt failed: %s", e)
                             _safe_set(fut, "n")
+                        finally:
+                            _input_active = False
 
                     asyncio.create_task(_resolve())
             else:
@@ -261,8 +269,10 @@ def make_interactive_handler(
             fut = event.future
             if interactive:
                 async def _resolve_questions() -> None:
+                    nonlocal _input_active
                     try:
                         async with input_lock:
+                            _input_active = True
                             answers: dict[str, str] = {}
                             for q in event.questions:
                                 answers.update(
@@ -272,10 +282,59 @@ def make_interactive_handler(
                     except Exception as e:
                         logger.error("User question prompt failed: %s", e)
                         _safe_set(fut, {})
+                    finally:
+                        _input_active = False
                 asyncio.create_task(_resolve_questions())
             else:
                 fut.set_result({})
         else:
+            if not _input_active:
+                base_handler(event)
+
+    return handler
+
+
+def make_headless_handler(
+    base_handler: Callable[[AgentEvent], None] | None = None,
+) -> EventCallback:
+    """Programmatic handler: auto-deny permissions, skip user questions.
+
+    *base_handler* receives all non-permission/question events.
+    If ``None``, those events are silently discarded.
+    """
+    def _safe_set(future: asyncio.Future, value: object) -> None:
+        if not future.done():
+            future.set_result(value)
+
+    def handler(event: AgentEvent) -> None:
+        if isinstance(event, PermissionRequest) and event.future is not None:
+            _safe_set(event.future, "n")
+        elif isinstance(event, UserQuestionRequest) and event.future is not None:
+            _safe_set(event.future, {})
+        elif base_handler is not None:
+            base_handler(event)
+
+    return handler
+
+
+def make_allow_all_handler(
+    base_handler: Callable[[AgentEvent], None] | None = None,
+) -> EventCallback:
+    """Trusted-environment handler: auto-approve all permissions.
+
+    *base_handler* receives all non-permission/question events.
+    If ``None``, those events are silently discarded.
+    """
+    def _safe_set(future: asyncio.Future, value: object) -> None:
+        if not future.done():
+            future.set_result(value)
+
+    def handler(event: AgentEvent) -> None:
+        if isinstance(event, PermissionRequest) and event.future is not None:
+            _safe_set(event.future, "always")
+        elif isinstance(event, UserQuestionRequest) and event.future is not None:
+            _safe_set(event.future, {})
+        elif base_handler is not None:
             base_handler(event)
 
     return handler

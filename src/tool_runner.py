@@ -233,6 +233,7 @@ class _TrackedTool:
     input: dict
     is_concurrent_safe: bool
     status: str  # "queued" | "executing" | "completed"
+    parse_error: str | None = None
     task: asyncio.Task | None = None
     result: ToolUseReturn | None = None
 
@@ -268,6 +269,7 @@ class StreamingToolExecutor:
             input=block.input if isinstance(block.input, dict) else {},
             is_concurrent_safe=is_safe,
             status="queued",
+            parse_error=getattr(block, "parse_error", None),
         )
         self._tools.append(tracked)
         self._maybe_start()
@@ -305,6 +307,12 @@ class StreamingToolExecutor:
 
     async def _run_one(self, tracked: _TrackedTool) -> None:
         try:
+            if tracked.parse_error:
+                error_msg = f"Tool call argument parse error for '{tracked.name}': {tracked.parse_error}"
+                self._on_event(ToolStart(label=self._label, tool_name=tracked.name, tool_input=tracked.input))
+                self._on_event(ToolEnd(label=self._label, is_error=True, tool_name=tracked.name, result_summary=error_msg))
+                tracked.result = (ToolResult(data=None), tracked.id, error_msg, True)
+                return
             result = await run_tool_use(
                 self._label, tracked.id, tracked.name, tracked.input,
                 self._context, self._on_event,

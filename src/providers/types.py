@@ -31,6 +31,7 @@ class ToolUseBlock:
     name: str = ""
     input: dict = field(default_factory=dict)
     type: Literal["tool_use"] = "tool_use"
+    parse_error: str | None = None
 
 
 @dataclass

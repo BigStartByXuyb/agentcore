@@ -169,14 +169,17 @@ def response_to_provider(response: Any) -> ProviderMessage:
 
     if message.tool_calls:
         for tc in message.tool_calls:
+            parse_error = None
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {"_raw": tc.function.arguments}
+            except json.JSONDecodeError as e:
+                args = {}
+                parse_error = f"JSON parse failed: {e}"
             content_blocks.append(ToolUseBlock(
                 id=tc.id,
                 name=tc.function.name,
                 input=args,
+                parse_error=parse_error,
             ))
 
     stop_reason = _map_finish_reason(choice.finish_reason)

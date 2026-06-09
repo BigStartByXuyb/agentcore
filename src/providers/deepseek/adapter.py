@@ -280,14 +280,17 @@ class _DeepSeekStream:
 
         for idx in sorted(self._tool_calls.keys()):
             tc = self._tool_calls[idx]
+            parse_error = None
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-            except json.JSONDecodeError:
-                args = {"_raw": tc["arguments"]}
+            except json.JSONDecodeError as e:
+                args = {}
+                parse_error = f"JSON parse failed: {e}"
             blocks.append(ToolUseBlock(
                 id=tc["id"],
                 name=tc["name"],
                 input=args,
+                parse_error=parse_error,
             ))
 
         stop_reason = converter._map_finish_reason(self._finish_reason)

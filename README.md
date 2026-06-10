@@ -230,6 +230,195 @@ asyncio.run(main())
 | `make_headless_handler()` | 无头模式 — 自动拒绝权限，跳过用户交互 |
 | `make_allow_all_handler()` | 信任模式 — 自动批准所有权限（脚本/测试用） |
 
+## 配置文件格式
+注意...我们当前的skill,agent都是可以直接复用全局项目下.claude目录的skill/agent文件夹的，因为方便通用，不用过多移植这些项目文件，可以在代码中进行更改目录
+### MCP 配置 (mcp.json)
+
+通过 JSON 文件配置 MCP 工具服务器。支持 stdio 和 HTTP 两种连接方式。
+
+**配置文件位置：**
+- 全局：`~/.my-agent/mcp.json`
+- 项目：`<项目目录>/.mcp.json`（优先级更高，同名覆盖全局）
+
+**stdio 模式（本地进程）：**
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-server-filesystem", "/path/to/dir"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
+```
+
+**HTTP 模式（远程服务）：**
+
+```json
+{
+  "mcpServers": {
+    "remote-tools": {
+      "type": "streamable_http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `command` | stdio 模式必填 | 可执行文件路径 |
+| `args` | 否 | 命令行参数列表 |
+| `env` | 否 | 环境变量，支持 `${VAR}` 引用系统变量 |
+| `type` | HTTP 模式必填 | 连接类型：`streamable_http` |
+| `url` | HTTP 模式必填 | 服务端 URL |
+
+---
+
+### Skill 文件 (SKILL.md)
+
+每个 Skill 一个子目录，目录内包含 `SKILL.md` 文件。格式与 Claude Code / Codex 的 Skill 文件兼容，可直接复用。
+
+**搜索路径（按优先级）：**
+1. `<项目>/skills/` — 项目级
+2. `<项目>/.claude/skills/` — 兼容 Claude Code 项目结构
+3. `~/.claude/skills/` — 全局，所有项目共享
+
+**目录结构：**
+```
+skills/                       # 或 .claude/skills/
+├── my-skill/
+│   └── SKILL.md
+└── another-skill/
+    └── SKILL.md
+```
+
+**inline 模式（默认，在主对话中执行）：**
+
+```markdown
+---
+description: 描述这个 Skill 的功能
+when_to_use: 什么场景下触发这个 Skill
+allowed-tools: read_file, grep
+---
+
+# Skill 正文
+
+这里写 Skill 的指导内容，LLM 会按照这些指令执行。
+支持 ${SKILL_DIR} 变量引用 Skill 所在目录。
+```
+
+**fork 模式（在独立子 agent 中执行）：**
+
+```markdown
+---
+description: 在隔离环境中执行的 Skill
+context: fork
+allowed-tools: bash
+---
+
+# Fork Skill 正文
+
+这个 Skill 会启动一个独立的子 agent 执行，不影响主对话上下文。
+```
+
+| frontmatter 字段 | 必填 | 说明 |
+|---|---|---|
+| `description` | 是 | Skill 功能描述，用于 LLM 判断是否调用 |
+| `when_to_use` | 否 | 触发场景说明 |
+| `context` | 否 | 执行模式：省略为 inline，`fork` 为独立子 agent |
+| `allowed-tools` | 否 | 工具白名单（逗号分隔），省略表示不限制 |
+
+---
+
+### Agent 文件 (AGENT.md)
+
+每个 Agent 一个子目录，目录内包含 `AGENT.md` 文件。格式与 Claude Code / Codex 的 Agent 文件兼容，可直接复用。
+
+**搜索路径（按优先级）：**
+1. `<项目>/agents/` — 项目级
+2. `<项目>/.claude/agents/` — 兼容 Claude Code 项目结构
+
+同名的自定义 Agent 会覆盖内置 Agent（Explore、Plan、Verification 等）。
+
+**目录结构：**
+```
+agents/                       # 或 .claude/agents/
+├── my-agent/
+│   └── AGENT.md
+└── code-reviewer/
+    └── AGENT.md
+```
+
+**示例：**
+
+```markdown
+---
+description: 快速搜索代码库的 agent
+max_turns: 8
+allowed_tools: bash, read_file, grep
+disallowed_tools: write_file
+---
+
+你是一个代码搜索 agent。
+根据用户的问题在代码库中查找相关内容，给出简洁的回答。
+不要派生子 agent，直接执行。
+```
+
+| frontmatter 字段 | 必填 | 说明 |
+|---|---|---|
+| `description` | 是 | Agent 功能描述，用于 LLM 选择调用 |
+| `name` | 否 | Agent 名称（省略则用目录名） |
+| `max_turns` | 否 | 最大执行轮次（默认跟随全局配置） |
+| `allowed_tools` | 否 | 工具白名单（逗号分隔），省略表示全部可用 |
+| `disallowed_tools` | 否 | 工具黑名单（逗号分隔），在白名单基础上排除 |
+
+---
+
+### 权限配置 (permissions.json)
+
+通过 JSON 文件控制工具的访问权限。
+
+**配置文件位置：**
+- 全局：`~/.my-agent/permissions.json`
+- 项目：`<项目目录>/agent-permissions.json`（优先级更高）
+
+**示例：**
+
+```json
+{
+  "allow": [
+    "bash(git *)",
+    "bash(npm install*)",
+    "read_file",
+    "grep"
+  ],
+  "deny": [
+    "bash(rm -rf*)",
+    "bash(curl*)",
+    "write_file(/etc/*)"
+  ]
+}
+```
+
+**规则格式：** `工具名` 或 `工具名(内容匹配模式)`
+
+| 规则示例 | 含义 |
+|---|---|
+| `read_file` | 允许/拒绝所有 read_file 调用 |
+| `bash(git *)` | 只匹配以 `git ` 开头的 bash 命令 |
+| `write_file(/tmp/*)` | 只匹配写入 /tmp/ 目录的操作 |
+
+**检查流程：** deny 规则优先扫描 → allow 规则扫描 → 无匹配则弹窗询问用户
+
+**优先级：** session（运行时动态添加）> project（项目配置）> user（全局配置）> 默认（ask）
+
+---
+
 ## 项目结构
 
 ```
